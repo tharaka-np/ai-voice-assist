@@ -39,8 +39,13 @@ export function ExtractionResult({
   return (
     <Card>
       <CardTitle hint={`via ${transcription.label}`}>
-        Extracted information
+        What the AI proposed
       </CardTitle>
+
+      <p className="mb-4 text-xs text-slate-500 dark:text-slate-400">
+        The original extraction, kept for reference. Edit the form above to change
+        what gets saved.
+      </p>
 
       <dl className="grid gap-5 sm:grid-cols-2">
         <Field label="Name" value={data.name} />

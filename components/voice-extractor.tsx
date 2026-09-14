@@ -5,7 +5,9 @@ import { useCallback, useRef, useState } from "react";
 import { AudioPlayer } from "@/components/audio-player";
 import { AudioRecorder } from "@/components/audio-recorder";
 import { ExtractionResult } from "@/components/extraction-result";
+import { MeetingForm } from "@/components/meeting-form";
 import { ProviderSelector } from "@/components/provider-selector";
+import { SavedMeetingCard } from "@/components/saved-meeting";
 import { TranscriptCard } from "@/components/transcript-card";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -22,6 +24,7 @@ import {
   PROCESS_AUDIO_FIELDS,
   type ProcessAudioResponse,
   type ProcessAudioSuccess,
+  type SavedMeeting,
 } from "@/types/api";
 
 const PROCESSING_MESSAGE = "Transcribing and extracting information…";
@@ -53,13 +56,22 @@ export function VoiceExtractor({
     useState<TranscriptionProviderId>(defaultProviderId);
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState<ResultsByProvider>({});
+  /** The run the form is bound to: the most recent successful extraction. */
+  const [activeResult, setActiveResult] = useState<ProcessAudioSuccess | null>(
+    null,
+  );
+  const [savedMeeting, setSavedMeeting] = useState<SavedMeeting | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  /** Incremented per extraction; used as the form's `key` to force a remount. */
+  const [runId, setRunId] = useState(0);
 
   /** Guards a second submit that lands before `isProcessing` has re-rendered. */
   const inFlightRef = useRef(false);
 
   const clearResults = useCallback(() => {
     setResults({});
+    setActiveResult(null);
+    setSavedMeeting(null);
     setRequestError(null);
   }, []);
 
@@ -88,6 +100,7 @@ export function VoiceExtractor({
     inFlightRef.current = true;
     setIsProcessing(true);
     setRequestError(null);
+    setSavedMeeting(null);
 
     try {
       const formData = new FormData();
@@ -130,6 +143,9 @@ export function VoiceExtractor({
         ...previous,
         [payload.transcription.provider]: payload,
       }));
+      setActiveResult(payload);
+      // Drives the form's `key`, forcing a fresh form per extraction run.
+      setRunId((previous) => previous + 1);
     } catch {
       // Thrown by `fetch` itself: offline, DNS failure, request aborted.
       setRequestError(
@@ -160,15 +176,6 @@ export function VoiceExtractor({
       <Card>
         <CardTitle hint="Step 1">Record</CardTitle>
 
-        {!recorder.isSupported ? (
-          <div className="mb-4">
-            <Alert tone="info" title="Recording isn't available in this browser">
-              Your browser doesn&apos;t support the MediaRecorder API. Try the
-              latest Chrome, Edge, Firefox or Safari.
-            </Alert>
-          </div>
-        ) : null}
-
         {/* Kept above the controls and always visible: the engine is a choice
             the user makes before recording, and stakeholders need to see that
             the option exists without having to record first. */}
@@ -180,6 +187,15 @@ export function VoiceExtractor({
             onChange={setProviderId}
           />
         </div>
+
+        {!recorder.isSupported ? (
+          <div className="mb-4">
+            <Alert tone="info" title="Recording isn't available in this browser">
+              Your browser doesn&apos;t support the MediaRecorder API. Try the
+              latest Chrome, Edge, Firefox or Safari.
+            </Alert>
+          </div>
+        ) : null}
 
         <AudioRecorder
           status={recorder.status}
@@ -259,14 +275,42 @@ export function VoiceExtractor({
       ) : null}
 
       {completedRuns.map((run) => (
-        <div key={run.transcription.provider} className="space-y-6">
-          <TranscriptCard
-            transcript={run.transcript}
-            transcription={run.transcription}
-          />
-          <ExtractionResult data={run.data} transcription={run.transcription} />
-        </div>
+        <TranscriptCard
+          key={run.transcription.provider}
+          transcript={run.transcript}
+          transcription={run.transcription}
+        />
       ))}
+
+      {/* Saved is a terminal state: the form is replaced by what was written, so
+          there is no half-edited form left implying more work to do. */}
+      {savedMeeting !== null ? (
+        <>
+          <SavedMeetingCard meeting={savedMeeting} />
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="secondary" onClick={handleReset}>
+              Record another
+            </Button>
+          </div>
+        </>
+      ) : null}
+
+      {savedMeeting === null && activeResult !== null ? (
+        <>
+          {/* `key` changes on every extraction so React remounts the form and
+              it re-reads the new proposal, instead of syncing via an effect. */}
+          <MeetingForm
+            key={`meeting-form-${runId}`}
+            proposed={activeResult.data}
+            nameMatch={activeResult.nameMatch}
+            onSaved={setSavedMeeting}
+          />
+          <ExtractionResult
+            data={activeResult.data}
+            transcription={activeResult.transcription}
+          />
+        </>
+      ) : null}
     </div>
   );
 }

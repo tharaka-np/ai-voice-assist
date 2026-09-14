@@ -1,0 +1,33 @@
+# Local development database.
+#
+# The credentials below are deliberately plain: this stack is for local
+# development only and the port is bound to 127.0.0.1, so it is not reachable
+# from the network. A deployed environment should supply its own credentials
+# through a secret manager rather than reusing anything here.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: voice-extractor-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: voice
+      POSTGRES_PASSWORD: localdevpassword
+      POSTGRES_DB: voice_extractor
+    ports:
+      # Bound to loopback only, never 0.0.0.0.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Files here run ONCE, on the first start of an empty volume. Changing the
+      # schema later requires `docker compose down -v` to drop the volume.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # The app can fail its first request if it connects while Postgres is
+      # still starting, so readiness is reported only once it accepts queries.
+      test: ["CMD-SHELL", "pg_isready -U voice -d voice_extractor"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  db-data:

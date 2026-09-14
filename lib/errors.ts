@@ -17,6 +17,8 @@ export type AppErrorCode =
   | "empty_transcript"
   | "extraction_failed"
   | "invalid_model_output"
+  | "database_error"
+  | "not_found"
   | "rate_limited"
   | "internal_error";
 
