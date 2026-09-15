@@ -12,12 +12,38 @@ Next.js route handler.
 ```bash
 npm install
 cp .env.local.example .env.local   # then add your OPENAI_API_KEY
+docker compose up -d               # Postgres, seeded on first start
 npm run dev
 ```
 
 Open http://localhost:3000.
 
-Requires Node.js 20 or newer.
+Requires Node.js 20 or newer and Docker.
+
+### Database
+
+`docker compose up -d` starts Postgres 16 on `127.0.0.1:5432` (loopback only) and
+runs `db/init/01-schema.sql`, which creates both tables and seeds 14 users.
+
+```bash
+docker compose ps                  # check health
+docker compose logs -f db          # follow logs
+docker compose down                # stop, keep data
+docker compose down -v             # stop and wipe data
+```
+
+**The init script runs once.** Postgres only executes files in
+`/docker-entrypoint-initdb.d/` when the data directory is empty, so editing
+`db/init/01-schema.sql` later has no effect until you drop the volume with
+`docker compose down -v`. If the schema starts changing often, that is the signal
+to add a real migration step.
+
+A quick look at what is stored:
+
+```bash
+docker exec -it voice-extractor-db psql -U voice -d voice_extractor \
+  -c 'SELECT * FROM meetings ORDER BY id;'
+```
 
 ### Try it
 
@@ -55,6 +81,7 @@ Expected result:
 | Variable                   | Required | Default             |
 | -------------------------- | -------- | ------------------- |
 | `OPENAI_API_KEY`           | yes      | —                   |
+| `DATABASE_URL`             | yes      | —                   |
 | `DEEPGRAM_API_KEY`         | no       | —                   |
 | `TRANSCRIPTION_PROVIDER`   | no       | `openai`            |
 | `TRANSCRIPTION_KEYTERMS`   | no       | two demo names      |
@@ -164,10 +191,27 @@ POST /api/process-audio          ← the only place any API key exists
    ├── extract        lib/openai/extract-structured.ts
    │                                                Structured Outputs, strict JSON Schema
    │
-   └── validate       schemas/meeting.ts            normalise, then Zod
+   ├── validate       schemas/meeting.ts            normalise, then Zod
+   │
+   └── resolve        lib/db/users.ts               rank directory matches for
+   ▼                                                the name that was heard
+{ success: true, transcript, transcription, data, nameMatch }
    ▼
-{ success: true, transcript, transcription, data }
+Confirmation form                                   pick the person, edit the
+   │                                                date, time and description
+   ▼
+POST /api/meetings                                  the only write path
+   │
+   ├── validate       schemas/meeting-submission.ts nothing may be null here
+   ├── check user     lib/db/users.ts               404 rather than an FK error
+   └── insert         lib/db/meetings.ts
+   ▼
+{ success: true, meeting }
 ```
+
+The boundary that matters: the model proposes a **name string**, and only the
+database resolves it to an **id**. Nothing an AI returns is ever treated as a
+record identifier, and no row is written that a person has not confirmed.
 
 ### Layout
 
@@ -184,9 +228,15 @@ components/
 ├── audio-recorder.tsx           capture controls (presentational)
 ├── audio-player.tsx
 ├── transcript-card.tsx          transcript + engine/model/latency badge
-├── extraction-result.tsx
+├── meeting-form.tsx             editable confirmation step
+├── user-picker.tsx              candidate list + directory search
+├── saved-meeting.tsx            terminal success state
+├── extraction-result.tsx        the original proposal, for reference
 ├── raw-json.tsx                 collapsible payload + Copy JSON
 └── ui/                          button, card, alert
+
+db/
+└── init/01-schema.sql           tables, pg_trgm, normalize_name, seed data
 
 hooks/
 └── use-audio-recorder.ts        MediaRecorder lifecycle
@@ -202,6 +252,12 @@ lib/
 │   ├── transcript.ts            shared empty-transcript guard
 │   ├── vocabulary.ts            keyterm hint set, sanitising and budgeting
 │   └── registry.ts              provider lookup, availability, default
+├── db/
+│   ├── client.ts                pool cached on globalThis, query() wrapper
+│   ├── users.ts                 candidate search, user lookup
+│   └── meetings.ts              insert, recent meetings
+├── matching/
+│   └── name-match.ts            pure normalising, scoring, resolution policy
 ├── deepgram/
 │   ├── client.ts                key and model resolution
 │   ├── request.ts               pure query builder incl. keyterms (unit tested)
@@ -267,6 +323,63 @@ cannot quietly bill a different vendor than the caller intended.
 }
 ```
 
+`nameMatch` carries the directory resolution:
+
+```json
+{
+  "status": "ambiguous",
+  "selectedUserId": null,
+  "searchedFor": "Amanda Wilson",
+  "candidates": [
+    { "id": 1, "fname": "Amanda", "lname": "Wilson", "label": "Amanda Wilson", "score": 1 },
+    { "id": 2, "fname": "Amanda", "lname": "Wilson", "label": "Amanda Wilson", "score": 1 }
+  ]
+}
+```
+
+### `GET /api/users/search?q=`
+
+Manual directory lookup, used when the automatic match is wrong or absent.
+Returns the same `status`, `selectedUserId` and `candidates` shape.
+
+### `POST /api/meetings`
+
+```json
+{
+  "userId": 5,
+  "date": "2026-09-20",
+  "time": "14:00",
+  "description": "Discuss the upcoming ScriptTrainer release"
+}
+```
+
+**201**
+
+```json
+{
+  "success": true,
+  "meeting": {
+    "id": 1,
+    "userId": 5,
+    "userLabel": "Eric Poe",
+    "date": "2026-09-20",
+    "time": "14:00",
+    "description": "Discuss the upcoming ScriptTrainer release",
+    "createdAt": "2026-09-14T07:45:40Z"
+  }
+}
+```
+
+All four fields are required. Validation messages are written for people to read,
+because they are surfaced verbatim in the response.
+
+| Status | Cause |
+| ------ | ----- |
+| 400 | A field is missing, malformed, or the date is impossible |
+| 404 | `userId` is not in the directory |
+| 405 | Method other than `POST` |
+| 503 | The database is unreachable |
+
 **Errors** return `{ "success": false, "error": string }` with a message that is
 safe to display. Diagnostics stay in the server log.
 
@@ -279,6 +392,42 @@ safe to display. Diagnostics stay in the server log.
 | 422    | Silent recording, or the model refused           |
 | 500    | Selected engine has no API key, or an unexpected fault |
 | 502    | Provider failure, or output that failed Zod      |
+
+## Name resolution
+
+The extractor returns a name as text. Turning that into a person is the database's
+job, and the rules live in `lib/matching/name-match.ts`.
+
+Candidates are scored in tiers so an exact match can never lose to a fuzzy one:
+
+| Tier | Match | Score |
+| ---- | ----- | ----- |
+| 1 | Full name exact, after normalising | 1.00 |
+| 2 | Reversed — "Wilson Amanda" | 0.90 |
+| 3 | Just the first or just the last name | 0.80 |
+| 4 | Trigram similarity, capped below tier 3 | 0.35–0.79 |
+
+Then one of three outcomes:
+
+- **resolved** — exactly one candidate at 0.95 or above. Preselected, but still
+  visible and changeable.
+- **ambiguous** — several plausible people. Nothing is preselected; the user
+  chooses.
+- **unresolved** — nothing matched, or no name was spoken. A directory search box
+  is offered.
+
+Attaching a meeting to the wrong person is worse than asking a question, so a
+close-but-uncertain match is never selected silently.
+
+Normalisation is duplicated on purpose: `normalizeName` in TypeScript and
+`normalize_name` in SQL must behave identically, or an exact match would be scored
+as fuzzy. Both lowercase, replace punctuation with spaces, collapse whitespace and
+preserve accented letters. The trigram index is built on the SQL function so the
+search stays index-backed.
+
+The seed data exists to exercise the hard paths: two users named **Amanda
+Wilson** force the picker, and **Tharaka** alongside **Taraka Pathirana**
+reproduces the near-miss a misheard name produces.
 
 ## Design decisions
 
@@ -304,6 +453,34 @@ letting a missing key surface later as an opaque provider error.
 `lib/transcription/types.ts` has no `server-only` import, so Client Components
 can share the ids, labels and result types. The adapters that touch credentials
 do import it, so they still cannot be bundled for the browser.
+
+**The connection pool lives on `globalThis`.** In development Next.js
+re-evaluates the module graph on every save. A module-level pool variable would
+reset each time while its sockets stayed open, and after enough edits Postgres
+refuses new connections at its default limit of 100. `globalThis` survives hot
+reload, so exactly one pool exists per process. This is why `lib/db/client.ts`
+differs from `lib/openai/client.ts` — the latter only holds configuration, so
+recreating it costs nothing.
+
+**Database rows are validated too.** `pg` has no knowledge of the table shape, so
+rows arrive loosely typed. They pass through Zod on the way out, which makes a
+column rename a clear validation error rather than an `undefined` reaching the UI.
+Dates and times are cast to text in SQL rather than relying on the driver, which
+would return `Date` objects and reintroduce the timezone shifts the display layer
+already guards against.
+
+**Two schemas for meetings, not one.** `MeetingInfoSchema` describes what the
+model proposed and allows null everywhere. `MeetingSubmissionSchema` describes what
+a human approved and allows null nowhere, because `meetings.date` and
+`meetings.time` are `NOT NULL`. A recording that never stated a time has to be
+completed on the form — the "never guess" rule resolving at the human step rather
+than with a silent default.
+
+**The form resets by `key`, not by effect.** `voice-extractor.tsx` gives
+`MeetingForm` a key that changes on each extraction, so React remounts it and the
+new proposal becomes the initial state. Syncing props into state with an effect
+would cause a cascading render, which ESLint's `react-hooks` rules correctly
+reject.
 
 **Schemas are swappable.** `schemas/extraction-schema.ts` defines a descriptor:
 a Zod schema, a strict JSON Schema, prompt guidance, and an optional normaliser.
@@ -374,9 +551,15 @@ without a key.
 
 Not included here, and worth adding before real traffic:
 
+- **Authentication.** `POST /api/meetings` writes to the database and is open to
+  anyone who can reach the server. That was tolerable when the app only returned
+  JSON; it is not once there is a database behind it. This is the most important
+  gap.
+- **Duplicate-submit protection.** The Save button disables while a request is in
+  flight, but that is usability, not a guarantee. A network retry can still create
+  two rows. The durable fix is an idempotency key with a unique constraint.
 - Per-user rate limiting ahead of the provider calls, so retries or a
   compromised session cannot run up provider spend.
-- Authentication. The route is currently open to anyone who can reach it.
 - Request tracing IDs through both provider calls.
 - An explicit audio and transcript retention policy. Nothing is persisted today;
   transcripts do pass through server logs only as a character count.

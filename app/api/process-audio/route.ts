@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { validateProcessAudioForm } from "@/lib/audio/validation";
+import { searchUsersByName } from "@/lib/db/users";
 import { AppError, logServerError, toPublicError } from "@/lib/errors";
 import { extractMeetingInfo } from "@/lib/openai/extract-meeting-info";
 import {
@@ -71,6 +72,15 @@ export async function POST(
       timezone,
     });
 
+    // Step 4 — resolve the extracted name against the directory. The model
+    // supplies a name string only; the database is the sole authority on which
+    // record that maps to, and ambiguity is handed back to the user rather than
+    // guessed at here.
+    const nameMatch =
+      data.name === null
+        ? { status: "unresolved" as const, selectedUserId: null, candidates: [] }
+        : await searchUsersByName(data.name);
+
     console.info(
       `[process-audio] ok provider=${transcription.providerId} ms=${Date.now() - startedAt} bytes=${audio.size}`,
     );
@@ -87,6 +97,7 @@ export async function POST(
           keytermCount: transcription.keytermCount,
         },
         data,
+        nameMatch: { ...nameMatch, searchedFor: data.name },
       },
       { status: 200 },
     );
