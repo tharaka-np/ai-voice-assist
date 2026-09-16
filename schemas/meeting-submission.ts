@@ -4,7 +4,7 @@ import {
   HH_MM_PATTERN,
   ISO_DATE_PATTERN,
   isRealCalendarDate,
-} from "@/schemas/meeting";
+} from "@/schemas/patterns";
 
 /**
  * The payload a user confirms and submits.

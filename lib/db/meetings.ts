@@ -2,7 +2,7 @@ import "server-only";
 
 import { query } from "@/lib/db/client";
 import { AppError } from "@/lib/errors";
-import { formatUserLabel } from "@/lib/matching/name-match";
+import { formatUserLabel } from "@/lib/matching/contact-match";
 import {
   SavedMeetingRowSchema,
   type MeetingSubmission,

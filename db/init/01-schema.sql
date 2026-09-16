@@ -1,8 +1,12 @@
--- Schema and seed data for the voice extractor.
+-- Schema for the voice extractor.
 --
 -- Executed automatically by the postgres image on the first start of an empty
--- volume. It does NOT re-run on later starts: use `docker compose down -v` to
--- reset, or add a migration step if the schema starts changing often.
+-- volume, before 02-seed-users.sql (the image runs files in filename order).
+-- It does NOT re-run on later starts: use `docker compose down -v` to reset.
+--
+-- Seed data lives in 02-seed-users.sql, which is written to be replayable
+-- against an already-running database so directory changes do not require
+-- dropping the volume.
 
 -- Trigram similarity, used to rank fuzzy name matches.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -27,10 +31,20 @@ $$ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE;
 -- ---------------------------------------------------------------------------
 -- Tables
 -- ---------------------------------------------------------------------------
+
+-- Contact columns are NOT NULL like everything else here: every seeded row
+-- carries a full address, so the constraint costs nothing and keeps the reader
+-- from having to reason about missing values. If real imports later arrive with
+-- partial contact details, relax the specific column rather than all of them.
 CREATE TABLE users (
-  id    SERIAL PRIMARY KEY,
-  fname TEXT NOT NULL,
-  lname TEXT NOT NULL
+  id           SERIAL PRIMARY KEY,
+  fname        TEXT NOT NULL,
+  lname        TEXT NOT NULL,
+  street       TEXT NOT NULL,
+  city         TEXT NOT NULL,
+  state        TEXT NOT NULL,
+  phone_number TEXT NOT NULL,
+  email        TEXT NOT NULL
 );
 
 CREATE TABLE meetings (
@@ -54,30 +68,9 @@ CREATE INDEX users_full_name_trgm_idx
   ON users
   USING gin (normalize_name(fname || ' ' || lname) gin_trgm_ops);
 
+-- Email is the stable identity of a seeded row: 02-seed-users.sql uses it to
+-- decide insert-vs-skip, so that lookup should not scan the table.
+CREATE UNIQUE INDEX users_email_key ON users (lower(email));
+
 CREATE INDEX meetings_user_id_idx ON meetings (user_id);
 CREATE INDEX meetings_date_idx ON meetings ("date");
-
--- ---------------------------------------------------------------------------
--- Seed data
---
--- Chosen to exercise the hard cases, not just the happy path:
---   * Amanda Wilson appears twice        -> forces the disambiguation picker
---   * Tharaka / Taraka Pathirana         -> near-miss spellings, the exact
---                                           failure a misheard name produces
---   * Remaining rows give fuzzy matching realistic competition
--- ---------------------------------------------------------------------------
-INSERT INTO users (fname, lname) VALUES
-  ('Amanda',    'Wilson'),
-  ('Amanda',    'Wilson'),
-  ('Tharaka',   'Pathirana'),
-  ('Taraka',    'Pathirana'),
-  ('Eric',      'Poe'),
-  ('Rachel',    'Taylor'),
-  ('John',      'Doe'),
-  ('James',     'Smith'),
-  ('Elizabeth', 'Martinez'),
-  ('Tyler',     'Harris'),
-  ('Sadia',     'Test'),
-  ('Kevin',     'Iaracey'),
-  ('Carlos',    'Hernandez'),
-  ('Priyal',    'Fernando');

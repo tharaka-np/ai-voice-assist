@@ -14,6 +14,11 @@ import {
   isTranscriptionProviderId,
   type TranscriptionProviderId,
 } from "@/lib/transcription/types";
+import {
+  emptyMeetingRequest,
+  meetingRequestSchema,
+  type ConversationState,
+} from "@/schemas/meeting-request";
 
 export type ValidatedAudioRequest = {
   audio: File;
@@ -21,7 +26,61 @@ export type ValidatedAudioRequest = {
   currentDateTime: string;
   /** Null means "use the server default". */
   providerId: TranscriptionProviderId | null;
+  /** Accumulated state from earlier turns; empty on the first turn. */
+  previousState: ConversationState;
 };
+
+/**
+ * Parses the accumulated conversation state the client echoes back each turn.
+ *
+ * Absent means "first turn" and yields an empty state. Malformed is rejected
+ * rather than silently reset: the client only ever sends state it received from
+ * this API, so a parse failure is a bug worth surfacing, and a 400 leaves the
+ * browser's copy of the state intact for a retry.
+ */
+export function readConversationState(formData: FormData): ConversationState {
+  const raw = formData.get("state");
+
+  if (raw === null || raw === "") return emptyMeetingRequest;
+
+  if (typeof raw !== "string") {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage: "That request wasn't readable. Please try again.",
+      detail: "form field 'state' was not a string",
+    });
+  }
+
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch (error) {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage: "That request wasn't readable. Please try again.",
+      detail: "form field 'state' was not valid JSON",
+      cause: error,
+    });
+  }
+
+  const parsed = meetingRequestSchema.safeParse(decoded);
+
+  if (!parsed.success) {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage:
+        "We lost track of the search details. Please start over and try again.",
+      detail: parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "state"}(${issue.code})`)
+        .join(", "),
+    });
+  }
+
+  return parsed.data;
+}
 
 const MetadataSchema = z.object({
   timezone: z
@@ -181,5 +240,6 @@ export function validateProcessAudioForm(
     timezone,
     currentDateTime,
     providerId: readTranscriptionProviderId(formData),
+    previousState: readConversationState(formData),
   };
 }

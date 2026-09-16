@@ -23,7 +23,8 @@ Requires Node.js 20 or newer and Docker.
 ### Database
 
 `docker compose up -d` starts Postgres 16 on `127.0.0.1:5432` (loopback only) and
-runs `db/init/01-schema.sql`, which creates both tables and seeds 14 users.
+runs the files in `db/init/` in filename order: `01-schema.sql` creates both
+tables, `02-seed-users.sql` seeds 100 users.
 
 ```bash
 docker compose ps                  # check health
@@ -32,11 +33,23 @@ docker compose down                # stop, keep data
 docker compose down -v             # stop and wipe data
 ```
 
-**The init script runs once.** Postgres only executes files in
+**The init scripts run once.** Postgres only executes files in
 `/docker-entrypoint-initdb.d/` when the data directory is empty, so editing
-`db/init/01-schema.sql` later has no effect until you drop the volume with
-`docker compose down -v`. If the schema starts changing often, that is the signal
-to add a real migration step.
+`01-schema.sql` later has no effect until you drop the volume with
+`docker compose down -v`.
+
+`02-seed-users.sql` is the exception. It is written to be replayable, so
+directory changes do not cost you the meetings you have saved:
+
+```bash
+docker exec -i voice-extractor-db \
+  psql -U voice -d voice_extractor -v ON_ERROR_STOP=1 \
+  < db/init/02-seed-users.sql
+```
+
+It adds its columns only if they are missing, backfills existing rows in place,
+inserts a row only when its email is absent, and applies `NOT NULL` last. Running
+it twice changes nothing the second time.
 
 A quick look at what is stored:
 
@@ -172,46 +185,54 @@ sides first.
 
 ## Architecture
 
+The search is a loop, not a single pass. Each turn adds detail until few enough
+contacts remain to choose from.
+
 ```text
-Browser
-   │  MediaRecorder + chosen engine
-   ▼
-Audio Blob
-   │  multipart/form-data
-   ▼
-POST /api/process-audio          ← the only place any API key exists
+        ┌──────────────────────────────────────────────┐
+        │                                              │
+        ▼                                              │
+Browser: speak one turn                                │
+   │  MediaRecorder + chosen engine + accumulated state │
+   ▼                                                   │
+POST /api/process-audio        ← the only place any key exists
+   │                                                   │
+   ├── validate     lib/audio/validation.ts   audio, timezone, provider,
+   │                                          and the state echoed back
    │
-   ├── validate       lib/audio/validation.ts       size, container, timezone,
-   │                                                timestamp, provider id
+   ├── transcribe   lib/transcription/registry.ts  resolves the adapter by id
+   │                  ├── lib/openai/transcribe.ts    gpt-4o-transcribe
+   │                  └── lib/deepgram/transcribe.ts  nova-3
    │
-   ├── transcribe     lib/transcription/registry.ts resolves the adapter by id
-   │                    ├── lib/openai/transcribe.ts     gpt-4o-transcribe
-   │                    └── lib/deepgram/transcribe.ts   nova-3
+   ├── extract      lib/openai/extract-structured.ts
+   │                                          THIS TURN ONLY; anything not
+   │                                          stated comes back as ""
    │
-   ├── extract        lib/openai/extract-structured.ts
-   │                                                Structured Outputs, strict JSON Schema
+   ├── merge        schemas/meeting-request.ts mergeConversationState:
+   │                                          empty never overwrites
    │
-   ├── validate       schemas/meeting.ts            normalise, then Zod
+   └── search       lib/db/contacts.ts        AND every populated contact
+   ▼                                          field; meeting fields excluded
+{ transcript, latestTurn, state, search }
+   │                                                   │
+   ├── search.mode === "refine"  (total >= threshold) ──┘  speak again
    │
-   └── resolve        lib/db/users.ts               rank directory matches for
-   ▼                                                the name that was heard
-{ success: true, transcript, transcription, data, nameMatch }
-   ▼
-Confirmation form                                   pick the person, edit the
-   │                                                date, time and description
-   ▼
-POST /api/meetings                                  the only write path
-   │
-   ├── validate       schemas/meeting-submission.ts nothing may be null here
-   ├── check user     lib/db/users.ts               404 rather than an FK error
-   └── insert         lib/db/meetings.ts
-   ▼
-{ success: true, meeting }
+   └── search.mode === "select"  (total < threshold)
+       ▼
+   Pick a contact, edit date / time / notes
+       ▼
+   POST /api/meetings                        the only write path
+       ├── validate    schemas/meeting-submission.ts  nothing may be empty here
+       ├── check user  lib/db/users.ts                404 rather than an FK error
+       └── insert      lib/db/meetings.ts
+       ▼
+   { success: true, meeting }
 ```
 
-The boundary that matters: the model proposes a **name string**, and only the
-database resolves it to an **id**. Nothing an AI returns is ever treated as a
-record identifier, and no row is written that a person has not confirmed.
+Two boundaries hold throughout. The model proposes **field values**; only the
+database resolves them to an **id**. And the model sees only the latest
+transcript — accumulation happens in `mergeConversationState`, so the state stays
+deterministic and the model cannot drop or reinvent a value it was never shown.
 
 ### Layout
 
@@ -236,7 +257,9 @@ components/
 └── ui/                          button, card, alert
 
 db/
-└── init/01-schema.sql           tables, pg_trgm, normalize_name, seed data
+└── init/
+    ├── 01-schema.sql            tables, pg_trgm, normalize_name, indexes
+    └── 02-seed-users.sql        100 users, replayable against a live volume
 
 hooks/
 └── use-audio-recorder.ts        MediaRecorder lifecycle
@@ -254,10 +277,12 @@ lib/
 │   └── registry.ts              provider lookup, availability, default
 ├── db/
 │   ├── client.ts                pool cached on globalThis, query() wrapper
-│   ├── users.ts                 candidate search, user lookup
+│   ├── users.ts                 single-user lookup
+│   ├── contacts.ts              multi-field conversational search
 │   └── meetings.ts              insert, recent meetings
+├── config.ts                    MATCH_THRESHOLD and search limits
 ├── matching/
-│   └── name-match.ts            pure normalising, scoring, resolution policy
+│   └── contact-match.ts         pure filters, scoring, threshold policy
 ├── deepgram/
 │   ├── client.ts                key and model resolution
 │   ├── request.ts               pure query builder incl. keyterms (unit tested)
@@ -267,7 +292,7 @@ lib/
     ├── client.ts                lazy SDK client, model selection
     ├── transcribe.ts            OpenAI adapter
     ├── extract-structured.ts    generic, schema-driven extraction
-    └── extract-meeting-info.ts  binds the meeting schema
+    └── extract-meeting-request.ts  binds the conversational schema
 
 schemas/
 ├── extraction-schema.ts         the swappable descriptor contract
@@ -292,6 +317,12 @@ tests/                           Vitest
 | `timezone`        | string | yes      | `Asia/Colombo`                |
 | `currentDateTime` | string | yes      | `2026-09-09T17:20:00+05:30`   |
 | `provider`        | string | no       | `openai` or `deepgram`        |
+| `state`           | string | no       | JSON of the accumulated state |
+
+`state` is the conversation so far, echoed back from the previous response. Absent
+means "first turn". Malformed is rejected with a 400 rather than silently reset:
+the client only ever sends state it received from this API, so a parse failure is
+a bug worth surfacing, and the browser keeps its copy for a retry.
 
 `timezone` and `currentDateTime` are required rather than defaulted. Relative
 phrases like "tomorrow at 2" resolve against them, and a server-side guess would
@@ -314,33 +345,48 @@ cannot quietly bill a different vendor than the caller intended.
     "latencyMs": 940,
     "keytermCount": 2
   },
-  "data": {
-    "name": "Tharaka",
-    "meetingDate": "2026-09-20",
-    "meetingTime": "14:00",
-    "notes": "Discuss the upcoming ScriptTrainer release"
+  "latestTurn": {
+    "fname": "", "lname": "Perera", "city": "",
+    "meetingDate": "", "meetingTime": "", "notes": "",
+    "phoneNumber": "", "email": "", "street": "", "state": "", "gender": ""
+  },
+  "state": {
+    "fname": "Tharaka", "lname": "Perera", "city": "Colombo",
+    "meetingDate": "2026-09-20", "meetingTime": "14:00",
+    "notes": "Discuss the upcoming Spice CRM release",
+    "phoneNumber": "", "email": "", "street": "", "state": "", "gender": ""
+  },
+  "search": {
+    "mode": "select",
+    "total": 2,
+    "threshold": 5,
+    "selectedContactId": null,
+    "contacts": [
+      {
+        "id": 101, "fname": "Tharaka", "lname": "Perera",
+        "label": "Tharaka Perera", "city": "Colombo", "state": "Western",
+        "email": "tharaka.perera@example.com", "gender": "male",
+        "score": 1, "matchedFields": ["fname", "lname", "city"]
+      }
+    ]
   }
 }
 ```
 
-`nameMatch` carries the directory resolution:
+`latestTurn` and `state` are both returned on purpose: the first shows what this
+sentence contributed, the second what the search actually used. That difference is
+what tells a user "it already knew that" rather than "it ignored me".
 
-```json
-{
-  "status": "ambiguous",
-  "selectedUserId": null,
-  "searchedFor": "Amanda Wilson",
-  "candidates": [
-    { "id": 1, "fname": "Amanda", "lname": "Wilson", "label": "Amanda Wilson", "score": 1 },
-    { "id": 2, "fname": "Amanda", "lname": "Wilson", "label": "Amanda Wilson", "score": 1 }
-  ]
-}
-```
+`search.mode` is one of `idle` (no contact filter yet), `refine`
+(`total >= threshold`), `select` (`total < threshold`) or `empty`. The threshold is
+echoed so the UI never hardcodes it.
 
-### `GET /api/users/search?q=`
+### `POST /api/contacts/search`
 
-Manual directory lookup, used when the automatic match is wrong or absent.
-Returns the same `status`, `selectedUserId` and `candidates` shape.
+Reruns the search for a state the user edited directly, so removing a mis-heard
+criterion chip does not require speaking again. Body is the conversation state;
+every field is optional and defaults to `""`. Returns the same `state` and
+`search` shape as above.
 
 ### `POST /api/meetings`
 
@@ -393,31 +439,61 @@ safe to display. Diagnostics stay in the server log.
 | 500    | Selected engine has no API key, or an unexpected fault |
 | 502    | Provider failure, or output that failed Zod      |
 
-## Name resolution
+## The conversational search
 
-The extractor returns a name as text. Turning that into a person is the database's
-job, and the rules live in `lib/matching/name-match.ts`.
+### Accumulated state and the merge rule
 
-Candidates are scored in tiers so an exact match can never lose to a fuzzy one:
+One state object spans the whole search, with eleven string fields. **Not stated is
+the empty string**, never null — that single convention is what makes the merge
+rule expressible in one line per field:
 
-| Tier | Match | Score |
-| ---- | ----- | ----- |
-| 1 | Full name exact, after normalising | 1.00 |
-| 2 | Reversed — "Wilson Amanda" | 0.90 |
-| 3 | Just the first or just the last name | 0.80 |
-| 4 | Trigram similarity, capped below tier 3 | 0.35–0.79 |
+```ts
+fname: incoming.fname || previous.fname
+```
 
-Then one of three outcomes:
+Two consequences, both intended. A turn that mentions nothing new leaves the
+criteria untouched, so a failed transcription costs nothing. And a turn that names
+a different person replaces just the fields it stated, so the meeting details
+survive a change of contact.
 
-- **resolved** — exactly one candidate at 0.95 or above. Preselected, but still
-  visible and changeable.
-- **ambiguous** — several plausible people. Nothing is preselected; the user
-  chooses.
-- **unresolved** — nothing matched, or no name was spoken. A directory search box
-  is offered.
+The state resets only on **Start over**, or after a meeting is saved.
 
-Attaching a meeting to the wrong person is worse than asking a question, so a
-close-but-uncertain match is never selected silently.
+### Contact fields versus meeting fields
+
+| Contact fields (narrow the search) | Meeting fields (never filter) |
+| ---------------------------------- | ----------------------------- |
+| `fname` `lname` `city` `street` `state` `phoneNumber` `email` `gender` | `meetingDate` `meetingTime` `notes` |
+
+The split lives in `schemas/meeting-request.ts` as data, so the UI, the search and
+the tests cannot drift apart. `buildContactFilters` reads only the first group,
+which is why a turn that supplies only a date never triggers a directory search.
+
+### The threshold
+
+`MATCH_THRESHOLD` in `lib/config.ts`, currently 5. The comparison is
+`total >= threshold`, so exactly five matches still asks for more detail and four
+offers selection. The value is echoed in every response rather than duplicated in
+the UI.
+
+### Matching
+
+Filters are ANDed, so the count falls monotonically as detail accumulates. Fields
+divide by how they tolerate error:
+
+| Fields | Matching | Why |
+| ------ | -------- | --- |
+| `fname` `lname` `city` `street` `state` | Exact, else trigram ≥ 0.35 | Spoken aloud, so misheard |
+| `email` | Exact, case-insensitive | A near-miss email is a different person |
+| `phoneNumber` | Last ten digits | Bridges `+1 (512) 555-0101` and `5125550101` |
+| `gender` | Exact | Two values; nothing to be fuzzy about |
+
+Per-field scores are averaged rather than summed, so one perfect match is not
+ranked below three loose ones. A lone remaining contact is preselected; several
+never are, because attaching a meeting to the wrong person is worse than asking.
+
+Spoken states are expanded to their postal abbreviation before querying — trigram
+similarity cannot bridge "texas" and "tx". Non-US regions such as Colombo's
+"Western" province fall through to the normal path.
 
 Normalisation is duplicated on purpose: `normalizeName` in TypeScript and
 `normalize_name` in SQL must behave identically, or an exact match would be scored
@@ -425,9 +501,23 @@ as fuzzy. Both lowercase, replace punctuation with spaces, collapse whitespace a
 preserve accented letters. The trigram index is built on the SQL function so the
 search stays index-backed.
 
-The seed data exists to exercise the hard paths: two users named **Amanda
-Wilson** force the picker, and **Tharaka** alongside **Taraka Pathirana**
-reproduces the near-miss a misheard name produces.
+The seed data exists to exercise the hard paths. Two users named **Amanda
+Wilson** force the picker, and the directory is otherwise built from clusters of
+near-homophones — distinct people whose names sound almost identical — because
+that is the failure speech-to-text actually produces: the right sound, the wrong
+spelling.
+
+```text
+Tharaka / Taraka / Dharaka  ·  Pathirana / Pathirane
+Sean Brady · Shaun Bradey · Shawn Bradie
+Catherine Lee · Katherine Lea · Kathryn Leigh
+Sofia Andersson · Sophia Anderson · Sofie Andersen
+```
+
+Searching `Tharaka Pathirana` returns the exact match at 1.00 with three capped
+fuzzy rivals beneath it, so the tier cap is visible rather than theoretical.
+Searching `Katherine Lee` returns no exact match at all and lands on
+**ambiguous**.
 
 ## Design decisions
 
@@ -469,12 +559,12 @@ Dates and times are cast to text in SQL rather than relying on the driver, which
 would return `Date` objects and reintroduce the timezone shifts the display layer
 already guards against.
 
-**Two schemas for meetings, not one.** `MeetingInfoSchema` describes what the
-model proposed and allows null everywhere. `MeetingSubmissionSchema` describes what
-a human approved and allows null nowhere, because `meetings.date` and
-`meetings.time` are `NOT NULL`. A recording that never stated a time has to be
-completed on the form — the "never guess" rule resolving at the human step rather
-than with a silent default.
+**Two schemas for meetings, not one.** `meetingRequestSchema` describes what the
+conversation has accumulated, where every field may be `""`. `MeetingSubmissionSchema`
+describes what a human approved, where nothing may be empty, because
+`meetings.date` and `meetings.time` are `NOT NULL`. A conversation that never
+mentioned a time has to have one filled in on the form — the "never guess" rule
+resolving at the human step rather than with a silent default.
 
 **The form resets by `key`, not by effect.** `voice-extractor.tsx` gives
 `MeetingForm` a key that changes on each extraction, so React remounts it and the
@@ -486,14 +576,16 @@ reject.
 a Zod schema, a strict JSON Schema, prompt guidance, and an optional normaliser.
 `lib/openai/extract-structured.ts` is generic over it. Moving to a richer shape
 means adding a descriptor and changing one import in
-`extract-meeting-info.ts` — no pipeline or route changes. A test asserts the Zod
+`extract-meeting-request.ts` — no pipeline or route changes. A test asserts the Zod
 and JSON schemas stay in step, since they are maintained side by side.
 
-**Normalise, then validate.** `normalizeMeetingInfo` deterministically repairs
-formatting the model may get slightly wrong: padding `2026-9-20`, stripping
-seconds from `14:00:00`, trimming whitespace, mapping placeholders like
-`"unknown"` to `null`, and dropping keys outside the schema. It never invents a
-value. Anything it cannot repair fails validation.
+**Normalise, then validate.** `normalizeMeetingRequest` deterministically repairs
+formatting the model may get slightly wrong: padding `2026-9-20`, stripping seconds
+from `14:00:00`, lowercasing emails, reducing phone numbers to digits, and dropping
+keys outside the schema. It also maps placeholder words like `"unknown"` to `""`,
+which matters more than it sounds — a literal "unknown" would otherwise become a
+search filter and quietly return zero matches. It never invents a value, and
+anything it cannot repair fails validation.
 
 **One client boundary.** `app/page.tsx` is a Server Component; `VoiceExtractor`
 is the only `"use client"` entry point that holds state. `lib/openai/*` imports
