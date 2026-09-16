@@ -11,7 +11,6 @@ import {
   populatedContactFields,
   populatedMeetingFields,
   hasContactCriteria,
-  clearField,
 } from "@/schemas/meeting-request";
 
 /** Mirrors what the pipeline does after `JSON.parse` of the model output. */
@@ -260,15 +259,10 @@ describe("field groups", () => {
     );
   });
 
-  it("clears a single field without touching the rest", () => {
-    const state = { ...emptyMeetingRequest, fname: "Eric", city: "Austin" };
-
-    expect(clearField(state, "city")).toEqual({
-      ...emptyMeetingRequest,
-      fname: "Eric",
-      city: "",
-    });
-  });
+  // There is deliberately no `clearField` test any more. Removing a single field
+  // was the criteria-chip affordance, and that layer is gone: state is re-derived
+  // from the conversation on every turn, so a locally cleared field would simply
+  // reappear. Corrections are spoken instead.
 });
 
 describe("meetingRequestExtractionSchema descriptor", () => {
@@ -302,11 +296,26 @@ describe("meetingRequestExtractionSchema descriptor", () => {
     }
   });
 
-  it("tells the model not to infer gender and not to reuse earlier turns", () => {
+  it("instructs the model to merge the whole conversation, latest mention winning", () => {
     const guidance = meetingRequestExtractionSchema.fieldGuidance;
 
-    expect(guidance).toContain("Never infer it from");
-    expect(guidance).toContain("Do not reuse values from earlier turns");
+    expect(guidance).toContain("ENTIRE conversation");
+    expect(guidance).toContain("Silence is not a deletion");
+    expect(guidance).toContain("LATEST message");
+  });
+
+  it("still forbids inferring gender from a name", () => {
+    expect(meetingRequestExtractionSchema.fieldGuidance).toContain(
+      "infer it from a first name",
+    );
+  });
+
+  it("carries both worked examples the merging behaviour depends on", () => {
+    const guidance = meetingRequestExtractionSchema.fieldGuidance;
+
+    // Turn-two-omits-the-name, and person-replacement.
+    expect(guidance).toContain("He lives in Colombo");
+    expect(guidance).toContain("Actually, find Eric Poe instead");
   });
 
   it("carries a schema name OpenAI accepts and a bumped version", () => {

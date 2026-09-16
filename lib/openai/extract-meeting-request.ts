@@ -10,12 +10,11 @@ import {
 } from "@/schemas/meeting-request";
 
 /**
- * Extracts one conversational turn into structured fields.
+ * Extracts the current state of a conversation into structured fields.
  *
- * Thin binding of the generic pipeline to one schema descriptor. The model sees
- * only the latest transcript — merging with earlier turns happens in
- * `mergeConversationState`, so extraction stays stateless and the accumulated
- * state stays deterministic.
+ * Thin binding of the generic pipeline to one schema descriptor. The model
+ * receives every transcript in the conversation and returns the merged result, so
+ * the returned object is the complete picture rather than one turn's contribution.
  */
 export function extractMeetingRequest(
   context: ExtractionContext,

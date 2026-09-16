@@ -5,7 +5,7 @@ import { useCallback, useRef, useState } from "react";
 import { AudioPlayer } from "@/components/audio-player";
 import { AudioRecorder } from "@/components/audio-recorder";
 import { ContactResults } from "@/components/contact-results";
-import { CriteriaChips } from "@/components/criteria-chips";
+import { ConversationSummary } from "@/components/conversation-summary";
 import { MeetingForm } from "@/components/meeting-form";
 import { ProviderSelector } from "@/components/provider-selector";
 import { SavedMeetingCard } from "@/components/saved-meeting";
@@ -20,29 +20,22 @@ import {
   idleSearchOutcome,
   type ContactSearchOutcome,
 } from "@/lib/matching/contact-match";
-import type { TranscriptionProviderId, TranscriptionProviderOption } from "@/lib/transcription/types";
+import type {
+  TranscriptionProviderId,
+  TranscriptionProviderOption,
+} from "@/lib/transcription/types";
 import {
-  clearField,
-  emptyMeetingRequest,
-  hasContactCriteria,
-  type ContactField,
+  initialConversationState,
   type ConversationState,
-  type MeetingField,
 } from "@/schemas/meeting-request";
 import {
   PROCESS_AUDIO_FIELDS,
-  type ContactSearchResponse,
   type ProcessAudioResponse,
   type SavedMeeting,
   type TranscriptionMeta,
 } from "@/types/api";
 
 const PROCESSING_MESSAGE = "Transcribing and extracting…";
-
-type LastTurn = {
-  transcript: string;
-  transcription: TranscriptionMeta;
-};
 
 type VoiceExtractorProps = {
   providerOptions: TranscriptionProviderOption[];
@@ -52,12 +45,18 @@ type VoiceExtractorProps = {
 /**
  * Orchestrates a multi-turn conversational contact search.
  *
- * Owns the accumulated conversation state and echoes it back to the server on
- * every turn, so the merge stays server-side and deterministic while this
- * component remains the single source of truth for what the user has told us.
+ * The only thing this component carries between turns is `transcripts` — the
+ * conversation itself. It never merges extracted fields. Every turn sends the whole
+ * transcript history to the server, the model re-derives the complete picture from
+ * it, and `state` is replaced wholesale with whatever comes back.
  *
- * State survives a failed turn on purpose: a transcription or extraction error
- * leaves the criteria untouched so the user can simply speak again.
+ * That is what makes spoken corrections work: "actually, Kandy" or "find Eric Poe
+ * instead" are simply later messages, and the model is told the latest mention
+ * wins. There is no local state for such a correction to fight against.
+ *
+ * The trade-off is that `state` is no longer deterministic. It is a model output,
+ * validated by Zod on the server, and it is re-derived on every turn rather than
+ * accumulated.
  */
 export function VoiceExtractor({
   providerOptions,
@@ -67,90 +66,35 @@ export function VoiceExtractor({
 
   const [providerId, setProviderId] =
     useState<TranscriptionProviderId>(defaultProviderId);
-  const [state, setState] = useState<ConversationState>(emptyMeetingRequest);
+
+  /** The conversation. The single piece of state carried across turns. */
+  const [transcripts, setTranscripts] = useState<string[]>([]);
+  /** The latest model output. Derived, replaced each turn, never combined. */
+  const [state, setState] = useState<ConversationState>(initialConversationState);
   const [search, setSearch] = useState<ContactSearchOutcome>(idleSearchOutcome);
-  const [lastTurn, setLastTurn] = useState<LastTurn | null>(null);
-  const [turnCount, setTurnCount] = useState(0);
+  const [lastTranscription, setLastTranscription] =
+    useState<TranscriptionMeta | null>(null);
+
   const [selectedContactId, setSelectedContactId] = useState<number | null>(null);
   const [savedMeeting, setSavedMeeting] = useState<SavedMeeting | null>(null);
 
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isSearching, setIsSearching] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
   /** Guards a second submit that lands before `isProcessing` has re-rendered. */
   const inFlightRef = useRef(false);
 
-  const busy = isProcessing || isSearching;
-
   const handleStartOver = useCallback(() => {
-    setState(emptyMeetingRequest);
+    setTranscripts([]);
+    setState(initialConversationState);
     setSearch(idleSearchOutcome);
-    setLastTurn(null);
-    setTurnCount(0);
+    setLastTranscription(null);
     setSelectedContactId(null);
     setSavedMeeting(null);
     setRequestError(null);
     recorder.resetRecording();
   }, [recorder]);
 
-  /** Reruns the search for a state the user edited directly. */
-  const runSearch = useCallback(async (nextState: ConversationState) => {
-    setIsSearching(true);
-    setRequestError(null);
-
-    try {
-      const response = await fetch("/api/contacts/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(nextState),
-      });
-
-      const payload = (await response.json()) as ContactSearchResponse;
-
-      if (!response.ok || payload.success === false) {
-        setRequestError(
-          payload.success === false ? payload.error : GENERIC_ERROR_MESSAGE,
-        );
-        return;
-      }
-
-      setSearch(payload.search);
-      // Drop a selection that is no longer among the results.
-      setSelectedContactId((current) =>
-        current !== null &&
-        payload.search.contacts.some((contact) => contact.id === current)
-          ? current
-          : payload.search.selectedContactId,
-      );
-    } catch {
-      setRequestError(
-        "We couldn't reach the server. Check your connection and try again.",
-      );
-    } finally {
-      setIsSearching(false);
-    }
-  }, []);
-
-  const handleRemoveCriterion = useCallback(
-    (field: ContactField | MeetingField) => {
-      const nextState = clearField(state, field);
-      setState(nextState);
-      setSavedMeeting(null);
-
-      if (hasContactCriteria(nextState)) {
-        void runSearch(nextState);
-      } else {
-        // Nothing left to search on; go back to the idle prompt rather than
-        // showing a stale result list.
-        setSearch(idleSearchOutcome);
-        setSelectedContactId(null);
-      }
-    },
-    [runSearch, state],
-  );
-
-  /** Sends one turn: audio plus the state accumulated so far. */
   const handleSubmitTurn = useCallback(async () => {
     const clip = recorder.clip;
     if (clip === null || inFlightRef.current) return;
@@ -173,9 +117,9 @@ export function VoiceExtractor({
         toLocalIsoString(new Date()),
       );
       formData.append(PROCESS_AUDIO_FIELDS.provider, providerId);
-      // The server merges this with the new turn, so accumulation never depends
-      // on the model remembering anything.
-      formData.append(PROCESS_AUDIO_FIELDS.state, JSON.stringify(state));
+      // The conversation so far. The server appends this turn's transcript and
+      // hands the whole thing to the model.
+      formData.append(PROCESS_AUDIO_FIELDS.history, JSON.stringify(transcripts));
 
       const response = await fetch("/api/process-audio", {
         method: "POST",
@@ -191,20 +135,17 @@ export function VoiceExtractor({
       }
 
       if (!response.ok || payload.success === false) {
-        // Criteria are deliberately left intact so the user can just try again.
+        // The conversation is deliberately left intact so the user can retry.
         setRequestError(
           payload.success === false ? payload.error : GENERIC_ERROR_MESSAGE,
         );
         return;
       }
 
+      setTranscripts(payload.transcripts);
       setState(payload.state);
       setSearch(payload.search);
-      setLastTurn({
-        transcript: payload.transcript,
-        transcription: payload.transcription,
-      });
-      setTurnCount((count) => count + 1);
+      setLastTranscription(payload.transcription);
       setSelectedContactId(payload.search.selectedContactId);
 
       // Clear the clip so the microphone is ready for the next turn.
@@ -217,7 +158,7 @@ export function VoiceExtractor({
       inFlightRef.current = false;
       setIsProcessing(false);
     }
-  }, [providerId, recorder, state]);
+  }, [providerId, recorder, transcripts]);
 
   const activeError = requestError ?? recorder.error;
   const selectedOption = providerOptions.find(
@@ -234,6 +175,7 @@ export function VoiceExtractor({
       : (search.contacts.find((contact) => contact.id === selectedContactId) ??
         null);
 
+  const turnCount = transcripts.length;
   const isFirstTurn = turnCount === 0;
 
   return (
@@ -247,7 +189,7 @@ export function VoiceExtractor({
           <ProviderSelector
             options={providerOptions}
             value={providerId}
-            disabled={busy}
+            disabled={isProcessing}
             onChange={setProviderId}
           />
         </div>
@@ -267,7 +209,7 @@ export function VoiceExtractor({
           duration={recorder.duration}
           maxDuration={recorder.maxDuration}
           hasClip={recorder.clip !== null}
-          busy={busy}
+          busy={isProcessing}
           onStart={recorder.startRecording}
           onStop={recorder.stopRecording}
           onReset={recorder.resetRecording}
@@ -289,7 +231,7 @@ export function VoiceExtractor({
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 onClick={handleSubmitTurn}
-                disabled={busy || !isProviderAvailable}
+                disabled={isProcessing || !isProviderAvailable}
               >
                 {isProcessing
                   ? PROCESSING_MESSAGE
@@ -311,7 +253,7 @@ export function VoiceExtractor({
 
         {turnCount > 0 ? (
           <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
-            <Button variant="ghost" onClick={handleStartOver} disabled={busy}>
+            <Button variant="ghost" onClick={handleStartOver} disabled={isProcessing}>
               Start over
             </Button>
           </div>
@@ -336,29 +278,25 @@ export function VoiceExtractor({
             </p>
           ) : null}
           {turnCount > 0 ? (
-            <p className="mt-2">Your search criteria have been kept.</p>
+            <p className="mt-2">Your conversation has been kept.</p>
           ) : null}
         </Alert>
       ) : null}
 
-      {lastTurn !== null ? (
+      {lastTranscription !== null && recorder.clip === null && turnCount > 0 ? (
         <TranscriptCard
-          transcript={lastTurn.transcript}
-          transcription={lastTurn.transcription}
+          transcript={transcripts[transcripts.length - 1] ?? ""}
+          transcription={lastTranscription}
         />
       ) : null}
 
-      <CriteriaChips
-        state={state}
-        busy={busy}
-        onRemove={handleRemoveCriterion}
-      />
+      <ConversationSummary transcripts={transcripts} state={state} />
 
       {savedMeeting === null ? (
         <ContactResults
           search={search}
           selectedContactId={selectedContactId}
-          busy={busy}
+          busy={isProcessing}
           onSelect={setSelectedContactId}
         />
       ) : null}

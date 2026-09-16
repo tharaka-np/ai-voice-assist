@@ -131,51 +131,13 @@ export const emptyMeetingRequest: MeetingRequest = {
 export const initialConversationState: ConversationState = emptyMeetingRequest;
 
 // ---------------------------------------------------------------------------
-// Merge
+// Derived state
+//
+// There is deliberately no merge function here. The model receives the whole
+// conversation and returns the already-merged result, so the application never
+// combines two states. What used to be `mergeConversationState` now lives in the
+// extraction prompt's merging rules.
 // ---------------------------------------------------------------------------
-
-/**
- * Folds one turn's extraction into the accumulated state.
- *
- * Two rules, and only two:
- *   1. An empty incoming value leaves the previous value alone.
- *   2. A non-empty incoming value replaces the previous value.
- *
- * Written field by field on purpose. A loop over the key list would need casts to
- * satisfy the narrower `gender` type, and this is the one function whose
- * behaviour the whole conversational flow depends on — being able to read it
- * without following generics is worth the repetition.
- *
- * Deliberately *not* delegated to the model. The LLM sees only the latest
- * transcript, so it cannot drop or invent a value it was never shown, and the
- * accumulated state stays deterministic.
- */
-export function mergeConversationState(
-  previous: ConversationState,
-  incoming: ConversationState,
-): ConversationState {
-  return {
-    fname: incoming.fname || previous.fname,
-    lname: incoming.lname || previous.lname,
-    meetingDate: incoming.meetingDate || previous.meetingDate,
-    meetingTime: incoming.meetingTime || previous.meetingTime,
-    notes: incoming.notes || previous.notes,
-    city: incoming.city || previous.city,
-    phoneNumber: incoming.phoneNumber || previous.phoneNumber,
-    email: incoming.email || previous.email,
-    street: incoming.street || previous.street,
-    state: incoming.state || previous.state,
-    gender: incoming.gender || previous.gender,
-  };
-}
-
-/** Clears one field, used by the removable criteria chips. */
-export function clearField(
-  state: ConversationState,
-  field: ContactField | MeetingField,
-): ConversationState {
-  return { ...state, [field]: "" };
-}
 
 /** Contact fields the user has actually supplied, in display order. */
 export function populatedContactFields(
@@ -195,6 +157,12 @@ export function populatedMeetingFields(
 export function hasContactCriteria(state: ConversationState): boolean {
   return populatedContactFields(state).length > 0;
 }
+
+/**
+ * The conversation state is now whatever the model last returned, so it is only
+ * ever replaced wholesale, never combined. `initialConversationState` remains the
+ * value used before the first turn and after a reset.
+ */
 
 // ---------------------------------------------------------------------------
 // Normalisation of raw model output
@@ -288,29 +256,46 @@ export const meetingRequestExtractionSchema =
     jsonSchema: meetingRequestJsonSchema,
     normalize: normalizeMeetingRequest,
     fieldGuidance: [
-      "This transcript is ONE TURN in an ongoing conversation.",
+      "You are given the ENTIRE conversation so far, oldest message first. Every",
+      "message is something the user said while searching for one contact.",
       "",
-      "Extract only what is stated in this message. Return an empty string for",
-      "everything else. Do not reuse values from earlier turns, do not guess, and",
-      "do not infer contact details. The application merges your output with what",
-      "it already knows, so omitting a value is safe and inventing one is not.",
+      "Read all of the messages together and return one complete object describing",
+      "what the user is looking for as of the latest message.",
+      "",
+      "Merging rules:",
+      "- A field never mentioned in any message must be an empty string.",
+      "- A field mentioned once keeps that value, even if later messages say nothing",
+      "  about it. Silence is not a deletion.",
+      "- A field mentioned more than once takes the value from the LATEST message",
+      "  that mentions it. A correction always wins over what came before.",
+      "- Never invent, guess or infer a value that no message stated.",
       "",
       "Fields to extract:",
       "- fname: first name only, as stated. Preserve the spelling; do not correct",
       "  it to a more common name.",
-      "- lname: last name only. Empty if the speaker gave only a first name.",
+      "- lname: last name only. Empty if the user gave only a first name.",
       "- city, street, state: location details, only if stated.",
       "- phoneNumber: digits only.",
       "- email: lowercase.",
-      '- gender: "male" or "female" only when stated outright. Never infer it from',
-      "  a first name.",
+      '- gender: "male" or "female" only when a message says so outright. Never',
+      "  infer it from a first name.",
       "- meetingDate: YYYY-MM-DD.",
       "- meetingTime: HH:mm, 24-hour.",
       "- notes: the meeting's purpose.",
       "",
-      'Example: "Actually find Eric Poe, his email is eric.poe@example.com" yields',
-      'fname "Eric", lname "Poe", email "eric.poe@example.com", and empty strings',
-      "for every other field, including the meeting details, because this message",
-      "does not restate them.",
+      "Worked example. Given these two messages:",
+      '  1. "Find Tharaka"',
+      '  2. "He lives in Colombo"',
+      'return fname "Tharaka" AND city "Colombo". Message two does not repeat the',
+      "name, but the name was never withdrawn, so it stays.",
+      "",
+      "Correction example. Given these two messages:",
+      '  1. "Find Amanda in Austin"',
+      '  2. "Actually, find Eric Poe instead"',
+      'return fname "Eric" and lname "Poe", because message two replaces the person.',
+      'city stays "Austin": no message replaced it.',
+      "",
+      "Reset example. If a message asks to start over, clear everything and keep only",
+      "what that message and any messages after it state.",
     ].join("\n"),
   });

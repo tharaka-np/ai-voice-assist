@@ -4,24 +4,28 @@ import { validateProcessAudioForm } from "@/lib/audio/validation";
 import { searchContacts } from "@/lib/db/contacts";
 import { AppError, logServerError, toPublicError } from "@/lib/errors";
 import { extractMeetingRequest } from "@/lib/openai/extract-meeting-request";
+import { truncateHistory } from "@/lib/prompt/messages";
 import {
   getDefaultTranscriptionProviderId,
   getTranscriptionProvider,
 } from "@/lib/transcription/registry";
 import { TRANSCRIPTION_PROVIDER_META } from "@/lib/transcription/types";
 import { getConfiguredKeyterms } from "@/lib/transcription/vocabulary";
-import { mergeConversationState } from "@/schemas/meeting-request";
 import type { ProcessAudioResponse } from "@/types/api";
 
 /**
  * One turn of a conversational contact search.
  *
- * Audio → transcript → this turn's fields → merged state → directory search.
+ * Audio → transcript → append to history → extract from the WHOLE history →
+ * directory search.
  *
- * The turn is stateless from the model's point of view: it sees only the latest
- * transcript and returns only what that transcript stated. Accumulation happens in
- * `mergeConversationState`, which keeps the state deterministic and stops the
- * model from dropping or reinventing a value it was never shown.
+ * The model performs the merge. It receives every transcript in the conversation
+ * and returns the complete picture as of the latest message, so there is no
+ * application-side merge and nothing but transcripts is carried between turns.
+ *
+ * The trade that buys: spoken corrections and replacements work naturally, at the
+ * cost of determinism. Zod validation of the model's response is therefore the
+ * only guard left before this data reaches the database.
  *
  * `pg` and the OpenAI SDK both need TCP sockets, which the edge runtime lacks.
  */
@@ -48,8 +52,8 @@ export async function POST(
     }
 
     // Step 1 — validate the upload, the time context, the provider choice and the
-    // accumulated state echoed back from earlier turns.
-    const { audio, timezone, currentDateTime, providerId, previousState } =
+    // transcript history echoed back from earlier turns.
+    const { audio, timezone, currentDateTime, providerId, history } =
       validateProcessAudioForm(formData);
 
     // Step 2 — speech to text through the selected adapter.
@@ -60,29 +64,32 @@ export async function POST(
       keyterms: getConfiguredKeyterms(),
     });
 
-    // Step 3 — extract only what this turn said. Empty strings everywhere else.
-    const latestTurn = await extractMeetingRequest({
-      transcript: transcription.transcript,
+    // Step 3 — this turn joins the conversation. Truncated here as well as in the
+    // prompt builder, so the array returned to the client cannot grow forever.
+    const transcripts = truncateHistory([...history, transcription.transcript]);
+
+    // Step 4 — the model reads the whole conversation and returns the merged
+    // state. A field nobody mentioned comes back empty; a field mentioned twice
+    // takes its latest value.
+    const state = await extractMeetingRequest({
+      transcripts,
       currentDateTime,
       timezone,
     });
-
-    // Step 4 — fold it into what we already knew. Empty incoming values never
-    // erase an earlier answer; non-empty ones replace it.
-    const state = mergeConversationState(previousState, latestTurn);
 
     // Step 5 — search on every populated contact field. Meeting fields are
     // excluded by construction inside `buildContactFilters`.
     const search = await searchContacts(state);
 
     console.info(
-      `[process-audio] ok provider=${transcription.providerId} ms=${Date.now() - startedAt} bytes=${audio.size} mode=${search.mode} total=${search.total}`,
+      `[process-audio] ok provider=${transcription.providerId} turns=${transcripts.length} ms=${Date.now() - startedAt} mode=${search.mode} total=${search.total}`,
     );
 
     return NextResponse.json(
       {
         success: true,
         transcript: transcription.transcript,
+        transcripts,
         transcription: {
           provider: transcription.providerId,
           label: TRANSCRIPTION_PROVIDER_META[transcription.providerId].label,
@@ -90,7 +97,6 @@ export async function POST(
           latencyMs: transcription.latencyMs,
           keytermCount: transcription.keytermCount,
         },
-        latestTurn,
         state,
         search,
       },
