@@ -27,3 +27,16 @@ export const MAX_CONTACT_RESULTS = 25;
  * noise rather than a candidate.
  */
 export const MIN_FIELD_SIMILARITY = 0.35;
+
+/**
+ * Turns kept in the conversation history sent to the extraction model.
+ *
+ * The whole history goes to the model on every turn, so this bounds both prompt
+ * growth and the cost of a runaway session. Generous for push-to-talk, where a
+ * search realistically takes two to four turns.
+ *
+ * When the cap is exceeded the OLDEST turns are dropped. That has a sharp edge
+ * worth knowing about: a correction such as "forget the city" only holds while the
+ * turn that said it is still inside the window.
+ */
+export const MAX_CONVERSATION_TURNS = 12;

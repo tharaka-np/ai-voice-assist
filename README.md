@@ -204,16 +204,15 @@ POST /api/process-audio        ← the only place any key exists
    │                  ├── lib/openai/transcribe.ts    gpt-4o-transcribe
    │                  └── lib/deepgram/transcribe.ts  nova-3
    │
-   ├── extract      lib/openai/extract-structured.ts
-   │                                          THIS TURN ONLY; anything not
-   │                                          stated comes back as ""
-   │
-   ├── merge        schemas/meeting-request.ts mergeConversationState:
-   │                                          empty never overwrites
+   ├── extract      lib/prompt/messages.ts     system + one user message PER TURN
+   │                lib/openai/extract-structured.ts
+   │                                          the model reads the whole
+   │                                          conversation and returns the
+   │                                          already-merged state
    │
    └── search       lib/db/contacts.ts        AND every populated contact
    ▼                                          field; meeting fields excluded
-{ transcript, latestTurn, state, search }
+{ transcript, transcripts, state, search }
    │                                                   │
    ├── search.mode === "refine"  (total >= threshold) ──┘  speak again
    │
@@ -229,16 +228,16 @@ POST /api/process-audio        ← the only place any key exists
    { success: true, meeting }
 ```
 
-Two boundaries hold throughout. The model proposes **field values**; only the
-database resolves them to an **id**. And the model sees only the latest
-transcript — accumulation happens in `mergeConversationState`, so the state stays
-deterministic and the model cannot drop or reinvent a value it was never shown.
+One boundary still holds absolutely: the model proposes **field values**, and only
+the database resolves them to an **id**. Nothing an AI returns is treated as a
+record identifier, and no row is written that a person has not confirmed.
 
 ### Layout
 
 ```text
 app/
-├── api/process-audio/route.ts   orchestration only, no provider logic
+├── api/process-audio/route.ts   one turn: transcribe, extract, search
+├── api/meetings/route.ts        the only write path
 ├── layout.tsx
 ├── page.tsx                     Server Component shell
 └── globals.css
@@ -250,9 +249,8 @@ components/
 ├── audio-player.tsx
 ├── transcript-card.tsx          transcript + engine/model/latency badge
 ├── meeting-form.tsx             editable confirmation step
-├── user-picker.tsx              candidate list + directory search
 ├── saved-meeting.tsx            terminal success state
-├── extraction-result.tsx        the original proposal, for reference
+├── conversation-summary.tsx     read-only criteria + transcript list
 ├── raw-json.tsx                 collapsible payload + Copy JSON
 └── ui/                          button, card, alert
 
@@ -280,7 +278,8 @@ lib/
 │   ├── users.ts                 single-user lookup
 │   ├── contacts.ts              multi-field conversational search
 │   └── meetings.ts              insert, recent meetings
-├── config.ts                    MATCH_THRESHOLD and search limits
+├── config.ts                    MATCH_THRESHOLD, limits, turn cap
+├── prompt/messages.ts           builds the message array (unit tested)
 ├── matching/
 │   └── contact-match.ts         pure filters, scoring, threshold policy
 ├── deepgram/
@@ -317,12 +316,13 @@ tests/                           Vitest
 | `timezone`        | string | yes      | `Asia/Colombo`                |
 | `currentDateTime` | string | yes      | `2026-09-09T17:20:00+05:30`   |
 | `provider`        | string | no       | `openai` or `deepgram`        |
-| `state`           | string | no       | JSON of the accumulated state |
+| `history`         | string | no       | JSON array of earlier transcripts |
 
-`state` is the conversation so far, echoed back from the previous response. Absent
-means "first turn". Malformed is rejected with a 400 rather than silently reset:
-the client only ever sends state it received from this API, so a parse failure is
-a bug worth surfacing, and the browser keeps its copy for a retry.
+`history` is the transcripts of earlier turns, echoed back from the previous
+response — the only thing carried between turns. Absent means "first turn".
+Malformed is rejected with a 400 rather than silently reset: the client only ever
+sends history it received from this API, so a parse failure is a bug worth
+surfacing, and the browser keeps its copy for a retry.
 
 `timezone` and `currentDateTime` are required rather than defaulted. Relative
 phrases like "tomorrow at 2" resolve against them, and a server-side guess would
@@ -345,11 +345,11 @@ cannot quietly bill a different vendor than the caller intended.
     "latencyMs": 940,
     "keytermCount": 2
   },
-  "latestTurn": {
-    "fname": "", "lname": "Perera", "city": "",
-    "meetingDate": "", "meetingTime": "", "notes": "",
-    "phoneNumber": "", "email": "", "street": "", "state": "", "gender": ""
-  },
+  "transcripts": [
+    "Find Tharaka. Meeting September 20th 2026 at 2 PM about the Spice CRM release.",
+    "He lives in Colombo",
+    "His last name is Perera"
+  ],
   "state": {
     "fname": "Tharaka", "lname": "Perera", "city": "Colombo",
     "meetingDate": "2026-09-20", "meetingTime": "14:00",
@@ -373,20 +373,13 @@ cannot quietly bill a different vendor than the caller intended.
 }
 ```
 
-`latestTurn` and `state` are both returned on purpose: the first shows what this
-sentence contributed, the second what the search actually used. That difference is
-what tells a user "it already knew that" rather than "it ignored me".
+`transcripts` is the truncated conversation to send back next turn. `state` is the
+model's complete merged view — replace it wholesale, never combine it with a
+previous value.
 
 `search.mode` is one of `idle` (no contact filter yet), `refine`
 (`total >= threshold`), `select` (`total < threshold`) or `empty`. The threshold is
 echoed so the UI never hardcodes it.
-
-### `POST /api/contacts/search`
-
-Reruns the search for a state the user edited directly, so removing a mis-heard
-criterion chip does not require speaking again. Body is the conversation state;
-every field is optional and defaults to `""`. Returns the same `state` and
-`search` shape as above.
 
 ### `POST /api/meetings`
 
@@ -441,22 +434,73 @@ safe to display. Diagnostics stay in the server log.
 
 ## The conversational search
 
-### Accumulated state and the merge rule
+### The model does the merging
 
-One state object spans the whole search, with eleven string fields. **Not stated is
-the empty string**, never null — that single convention is what makes the merge
-rule expressible in one line per field:
+Only one thing is carried between turns: **the transcripts**. The extracted fields
+are not accumulated anywhere — they are re-derived from the whole conversation on
+every turn.
 
-```ts
-fname: incoming.fname || previous.fname
+```text
+turn 1   history: []
+         → model sees: ["Find Tharaka"]
+         → returns: fname "Tharaka", everything else ""
+
+turn 2   history: ["Find Tharaka"]
+         → model sees: ["Find Tharaka", "He lives in Colombo"]
+         → returns: fname "Tharaka" AND city "Colombo"
 ```
 
-Two consequences, both intended. A turn that mentions nothing new leaves the
-criteria untouched, so a failed transcription costs nothing. And a turn that names
-a different person replaces just the fields it stated, so the meeting details
-survive a change of contact.
+Turn 2 never restates the name, and no application code puts it back. The model
+keeps it because the prompt says *silence is not a deletion*. The merging rules
+live in `fieldGuidance` in `schemas/meeting-request.ts`:
 
-The state resets only on **Start over**, or after a meeting is saved.
+- never mentioned → empty string
+- mentioned once → that value persists
+- mentioned again → the **latest** message wins
+
+So "actually, find Eric Poe instead" is just a later message, and corrections work
+without any special handling.
+
+The conversation resets on **Start over**, or after a meeting is saved. History is
+capped at `MAX_CONVERSATION_TURNS`, dropping oldest-first.
+
+### What this costs
+
+Worth stating plainly, because it is the trade this design makes.
+
+`state` is a model output, not a computed value. The response *shape* is still
+guaranteed by Structured Outputs and re-checked by Zod, but the *values* are no
+longer deterministic — the same two sentences can in principle produce different
+results.
+
+The 30 unit tests that used to assert merge behaviour in microseconds are gone,
+because that behaviour is no longer a function. They are replaced by
+`tests/llm-merge.live.test.ts`, which is opt-in:
+
+```bash
+set -a; . ./.env.local; set +a; npm run test:live
+```
+
+It costs a few cents and needs the network, which is why `npm test` skips it. If
+you change the extraction prompt, run it.
+
+### No editable criteria
+
+There is deliberately no chip layer for editing individual fields. Since state is
+re-derived from the conversation each turn, a locally cleared field would simply
+reappear on the next turn — the edit has nowhere to live.
+
+`ConversationSummary` therefore shows the criteria **read-only**, alongside the
+transcript list that produced them. Corrections are spoken: say the value again, or
+say to start over.
+
+One consequence to know about: because only an explicit restatement overrides a
+field, switching person mid-conversation keeps the previous person's location.
+"Find Amanda in Austin" then "actually find Eric Poe" yields Eric Poe **in
+Austin** — and since Eric Poe lives in San Jose, that combination matches nobody.
+This is the case §7 of the specification anticipates and defers; the recovery today
+is Start over. Instructing the model to clear stale contact fields on an explicit
+person switch would fix it, at the cost of less predictable behaviour.
 
 ### Contact fields versus meeting fields
 
@@ -630,14 +674,20 @@ file upload path remains.
 npm test
 ```
 
-Covers schema validation, missing and null values, invalid model responses,
+Covers schema validation, empty-string handling, invalid model responses,
 normalisation and date formatting, request validation, provider-id validation,
 Deepgram response parsing, and Zod/JSON-Schema parity.
 
 Tests target the pure modules. The provider adapters are thin HTTP wrappers left
 to integration testing, which is why Deepgram's response envelope is parsed by a
 separate pure function in `lib/deepgram/response.ts` — that part is testable
-without a key.
+without a key. The same reasoning applies to `lib/prompt/messages.ts`: the message
+array is deterministic and asserted, while the merge the model performs on it is
+not, and is covered by the opt-in live suite instead.
+
+```bash
+set -a; . ./.env.local; set +a; npm run test:live
+```
 
 ## Notes for production
 

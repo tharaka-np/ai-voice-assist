@@ -14,11 +14,7 @@ import {
   isTranscriptionProviderId,
   type TranscriptionProviderId,
 } from "@/lib/transcription/types";
-import {
-  emptyMeetingRequest,
-  meetingRequestSchema,
-  type ConversationState,
-} from "@/schemas/meeting-request";
+
 
 export type ValidatedAudioRequest = {
   audio: File;
@@ -26,29 +22,39 @@ export type ValidatedAudioRequest = {
   currentDateTime: string;
   /** Null means "use the server default". */
   providerId: TranscriptionProviderId | null;
-  /** Accumulated state from earlier turns; empty on the first turn. */
-  previousState: ConversationState;
+  /** Transcripts of earlier turns, oldest first. Empty on the first turn. */
+  history: string[];
 };
 
-/**
- * Parses the accumulated conversation state the client echoes back each turn.
- *
- * Absent means "first turn" and yields an empty state. Malformed is rejected
- * rather than silently reset: the client only ever sends state it received from
- * this API, so a parse failure is a bug worth surfacing, and a 400 leaves the
- * browser's copy of the state intact for a retry.
- */
-export function readConversationState(formData: FormData): ConversationState {
-  const raw = formData.get("state");
+/** Guards against a client sending an unbounded transcript array. */
+const MAX_HISTORY_ENTRIES = 100;
+const MAX_TRANSCRIPT_LENGTH = 5_000;
 
-  if (raw === null || raw === "") return emptyMeetingRequest;
+const HistorySchema = z.array(
+  z.string().max(MAX_TRANSCRIPT_LENGTH, "a transcript was unreasonably long"),
+);
+
+/**
+ * Parses the conversation history the client echoes back each turn.
+ *
+ * This is the only thing carried between turns now: the extracted fields are not
+ * sent back, because the model re-derives them from the whole conversation.
+ *
+ * Absent means "first turn". Malformed is rejected rather than silently reset —
+ * the client only ever sends history it received from this API, so a parse failure
+ * is a bug worth surfacing, and a 400 leaves the browser's copy intact for a retry.
+ */
+export function readTranscriptHistory(formData: FormData): string[] {
+  const raw = formData.get("history");
+
+  if (raw === null || raw === "") return [];
 
   if (typeof raw !== "string") {
     throw new AppError({
       code: "invalid_metadata",
       status: 400,
       publicMessage: "That request wasn't readable. Please try again.",
-      detail: "form field 'state' was not a string",
+      detail: "form field 'history' was not a string",
     });
   }
 
@@ -60,22 +66,32 @@ export function readConversationState(formData: FormData): ConversationState {
       code: "invalid_metadata",
       status: 400,
       publicMessage: "That request wasn't readable. Please try again.",
-      detail: "form field 'state' was not valid JSON",
+      detail: "form field 'history' was not valid JSON",
       cause: error,
     });
   }
 
-  const parsed = meetingRequestSchema.safeParse(decoded);
+  const parsed = HistorySchema.safeParse(decoded);
 
   if (!parsed.success) {
     throw new AppError({
       code: "invalid_metadata",
       status: 400,
       publicMessage:
-        "We lost track of the search details. Please start over and try again.",
+        "We lost track of the conversation. Please start over and try again.",
       detail: parsed.error.issues
-        .map((issue) => `${issue.path.join(".") || "state"}(${issue.code})`)
+        .map((issue) => `${issue.path.join(".") || "history"}(${issue.code})`)
         .join(", "),
+    });
+  }
+
+  if (parsed.data.length > MAX_HISTORY_ENTRIES) {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage:
+        "This conversation has gone on too long. Please start a new search.",
+      detail: `history had ${parsed.data.length} entries, limit ${MAX_HISTORY_ENTRIES}`,
     });
   }
 
@@ -240,6 +256,6 @@ export function validateProcessAudioForm(
     timezone,
     currentDateTime,
     providerId: readTranscriptionProviderId(formData),
-    previousState: readConversationState(formData),
+    history: readTranscriptHistory(formData),
   };
 }

@@ -1,9 +1,6 @@
 import type { ContactSearchOutcome } from "@/lib/matching/contact-match";
 import type { TranscriptionProviderId } from "@/lib/transcription/types";
-import type {
-  ConversationState,
-  MeetingRequest,
-} from "@/schemas/meeting-request";
+import type { ConversationState } from "@/schemas/meeting-request";
 
 /**
  * Wire contracts for the API routes.
@@ -33,15 +30,21 @@ export type TranscriptionMeta = {
 
 export type ProcessAudioSuccess = {
   success: true;
+  /** Just this turn's speech. */
   transcript: string;
+  /**
+   * The whole conversation, already truncated, for the client to send back next
+   * turn. This is the only thing carried between turns — the extracted fields are
+   * re-derived from it by the model, not accumulated by the client.
+   */
+  transcripts: string[];
   transcription: TranscriptionMeta;
   /**
-   * Only what this turn stated. Returned alongside the merged state so the UI can
-   * show what the latest sentence actually contributed, which is the difference
-   * between "it ignored me" and "it already knew that".
+   * The model's complete merged view as of the latest message.
+   *
+   * Replaced wholesale on every turn. The client must not combine this with a
+   * previous value; the merge already happened inside the model.
    */
-  latestTurn: MeetingRequest;
-  /** Accumulated state after merging this turn into the previous one. */
   state: ConversationState;
   search: ContactSearchOutcome;
 };
@@ -54,26 +57,9 @@ export const PROCESS_AUDIO_FIELDS = {
   timezone: "timezone",
   currentDateTime: "currentDateTime",
   provider: "provider",
-  /** JSON-encoded accumulated state from previous turns. Optional on turn one. */
-  state: "state",
+  /** JSON array of earlier transcripts, oldest first. Absent on turn one. */
+  history: "history",
 } as const;
-
-// ---------------------------------------------------------------------------
-// POST /api/contacts/search  — rerun the search without speaking
-// ---------------------------------------------------------------------------
-
-/**
- * Used when the user edits the criteria directly, for example removing a chip the
- * extractor got wrong. Takes the state rather than a query string because the
- * search is over eight fields, not one.
- */
-export type ContactSearchSuccess = {
-  success: true;
-  state: ConversationState;
-  search: ContactSearchOutcome;
-};
-
-export type ContactSearchResponse = ContactSearchSuccess | ApiFailure;
 
 // ---------------------------------------------------------------------------
 // POST /api/meetings
