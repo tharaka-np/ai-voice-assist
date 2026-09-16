@@ -273,3 +273,25 @@ export function resolveContactSearch(
     selectedContactId: ranked.length === 1 ? ranked[0].id : null,
   };
 }
+
+/**
+ * Keeps a selection made on an earlier turn, if it is still a legitimate answer.
+ *
+ * A choice has to outlive the sentence that made it. Most turns say nothing about
+ * who was picked — "schedule it for 4pm" names no position — so the selection is
+ * carried forward rather than recomputed. `resolveContactSearch` only auto-selects a
+ * lone row, so without this a pick among several would vanish on the very next turn.
+ *
+ * Re-checked against the current matches rather than trusted, for two reasons: the
+ * id arrives from the client, and the same turn's criteria may have narrowed the
+ * list past the selected person. Returns null in that case so the caller can fall
+ * back and tell the user.
+ */
+export function keepCarriedSelection(
+  carried: number | null,
+  contacts: readonly ContactCandidate[],
+): number | null {
+  if (carried === null) return null;
+
+  return contacts.some((contact) => contact.id === carried) ? carried : null;
+}

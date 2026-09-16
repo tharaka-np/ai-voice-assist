@@ -7,6 +7,7 @@ import {
   expandStateForms,
   formatUserLabel,
   isFuzzyContactField,
+  keepCarriedSelection,
   matchedFieldsFrom,
   normalizeName,
   resolveContactSearch,
@@ -260,5 +261,37 @@ describe("resolveContactSearch", () => {
     resolveContactSearch(2, input);
 
     expect(input.map((contact) => contact.id)).toEqual(order);
+  });
+});
+
+describe("keepCarriedSelection", () => {
+  const amandas = [
+    candidate(101, "Amanda", "Wilson", 1),
+    candidate(102, "Amanda", "Perera", 1),
+    candidate(103, "Amanda", "Silva", 1),
+  ];
+
+  it("keeps a selection that is still among the matches", () => {
+    // The reported bug: "select the third one" then "schedule it for 4pm". The
+    // second turn names no position, and three rows still match, so nothing else
+    // would preserve the choice.
+    expect(keepCarriedSelection(103, amandas)).toBe(103);
+  });
+
+  it("drops a selection the current criteria exclude", () => {
+    expect(keepCarriedSelection(103, amandas.slice(0, 2))).toBeNull();
+  });
+
+  it("drops an id that was never a match", () => {
+    // The value arrives from the client, so it is a claim to verify, not a grant.
+    expect(keepCarriedSelection(999, amandas)).toBeNull();
+  });
+
+  it("passes through when nothing was selected", () => {
+    expect(keepCarriedSelection(null, amandas)).toBeNull();
+  });
+
+  it("drops any selection once there are no matches at all", () => {
+    expect(keepCarriedSelection(103, [])).toBeNull();
   });
 });

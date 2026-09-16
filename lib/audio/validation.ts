@@ -24,7 +24,118 @@ export type ValidatedAudioRequest = {
   providerId: TranscriptionProviderId | null;
   /** Transcripts of earlier turns, oldest first. Empty on the first turn. */
   history: string[];
+  /**
+   * Contact ids in the order the browser is displaying them.
+   *
+   * Sent so a spoken "the third one" can be resolved against exactly what is on
+   * screen. Empty when no results are shown.
+   */
+  displayedContactIds: number[];
+  /**
+   * The contact already selected when this turn was spoken, if any.
+   *
+   * A selection has to survive turns that say nothing about it. "Select the third
+   * one" followed by "schedule it for 4pm" must keep the third one — the second
+   * sentence names no position, so without this the selection would be recomputed
+   * from scratch and lost.
+   */
+  selectedContactId: number | null;
 };
+
+/** Matches MAX_CONTACT_RESULTS; a longer list cannot be on screen. */
+const MAX_DISPLAYED_IDS = 25;
+
+const DisplayedIdsSchema = z.array(z.number().int().positive());
+
+/**
+ * Parses the ids of the rows currently shown.
+ *
+ * Validated rather than trusted: these values index into a list the server builds,
+ * and a malformed array should fail loudly rather than silently shift positions.
+ */
+export function readDisplayedContactIds(formData: FormData): number[] {
+  const raw = formData.get("displayedContactIds");
+
+  if (raw === null || raw === "") return [];
+
+  if (typeof raw !== "string") {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage: "That request wasn't readable. Please try again.",
+      detail: "form field 'displayedContactIds' was not a string",
+    });
+  }
+
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch (error) {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage: "That request wasn't readable. Please try again.",
+      detail: "form field 'displayedContactIds' was not valid JSON",
+      cause: error,
+    });
+  }
+
+  const parsed = DisplayedIdsSchema.safeParse(decoded);
+
+  if (!parsed.success) {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage: "That request wasn't readable. Please try again.",
+      detail: "displayedContactIds must be an array of positive integers",
+    });
+  }
+
+  // Truncate rather than reject: an over-long list is a client bug, not something
+  // the user can act on, and the first 25 are what they can actually see.
+  return parsed.data.slice(0, MAX_DISPLAYED_IDS);
+}
+
+const SelectedIdSchema = z.number().int().positive();
+
+/**
+ * Parses the selection already in effect, so a later turn can keep it.
+ *
+ * Absent and empty both mean "nothing selected", which is the normal first-turn
+ * case. A present-but-unparseable value is a 400: quietly treating it as "nothing
+ * selected" would drop the user's choice, which is the failure this field exists to
+ * prevent.
+ *
+ * The id is a claim by the client, not a grant. The route only honours it if that
+ * contact is still among this turn's matches.
+ */
+export function readSelectedContactId(formData: FormData): number | null {
+  const raw = formData.get("selectedContactId");
+
+  if (raw === null || raw === "") return null;
+
+  if (typeof raw !== "string") {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage: "That request wasn't readable. Please try again.",
+      detail: "form field 'selectedContactId' was not a string",
+    });
+  }
+
+  const parsed = SelectedIdSchema.safeParse(Number(raw));
+
+  if (!parsed.success) {
+    throw new AppError({
+      code: "invalid_metadata",
+      status: 400,
+      publicMessage: "That request wasn't readable. Please try again.",
+      detail: `selectedContactId must be a positive integer, got '${raw}'`,
+    });
+  }
+
+  return parsed.data;
+}
 
 /** Guards against a client sending an unbounded transcript array. */
 const MAX_HISTORY_ENTRIES = 100;
@@ -257,5 +368,7 @@ export function validateProcessAudioForm(
     currentDateTime,
     providerId: readTranscriptionProviderId(formData),
     history: readTranscriptHistory(formData),
+    displayedContactIds: readDisplayedContactIds(formData),
+    selectedContactId: readSelectedContactId(formData),
   };
 }

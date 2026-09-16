@@ -214,11 +214,12 @@ POST /api/process-audio        ← the only place any key exists
    ▼                                          field; meeting fields excluded
 { transcript, transcripts, state, search }
    │                                                   │
-   ├── search.mode === "refine"  (total >= threshold) ──┘  speak again
-   │
+   ├── search.mode === "refine"  (total >= threshold) ──┘  asks for another
+   │                                                       detail; picking is
+   │                                                       still allowed
    └── search.mode === "select"  (total < threshold)
        ▼
-   Pick a contact, edit date / time / notes
+   Pick a contact by voice or click, edit date / time / notes
        ▼
    POST /api/meetings                        the only write path
        ├── validate    schemas/meeting-submission.ts  nothing may be empty here
@@ -247,6 +248,7 @@ components/
 ├── provider-selector.tsx        transcription engine radio group
 ├── audio-recorder.tsx           capture controls (presentational)
 ├── audio-player.tsx
+├── contact-results.tsx          match list, selection, capture controls slot
 ├── transcript-card.tsx          transcript + engine/model/latency badge
 ├── meeting-form.tsx             editable confirmation step
 ├── saved-meeting.tsx            terminal success state
@@ -281,7 +283,8 @@ lib/
 ├── config.ts                    MATCH_THRESHOLD, limits, turn cap
 ├── prompt/messages.ts           builds the message array (unit tested)
 ├── matching/
-│   └── contact-match.ts         pure filters, scoring, threshold policy
+│   ├── contact-match.ts         pure filters, scoring, threshold policy
+│   └── selection-cue.ts         positional-language gate, selection veto
 ├── deepgram/
 │   ├── client.ts                key and model resolution
 │   ├── request.ts               pure query builder incl. keyterms (unit tested)
@@ -291,11 +294,15 @@ lib/
     ├── client.ts                lazy SDK client, model selection
     ├── transcribe.ts            OpenAI adapter
     ├── extract-structured.ts    generic, schema-driven extraction
-    └── extract-meeting-request.ts  binds the conversational schema
+    └── interpret-turn.ts        binds the turn schema, applies the veto
 
 schemas/
 ├── extraction-schema.ts         the swappable descriptor contract
-└── meeting.ts                   Zod schema + JSON Schema + prompt guidance
+├── meeting-request.ts           merged criteria: Zod + JSON Schema + guidance
+├── conversation-turn.ts         intent and position, wrapping the request
+├── meeting-submission.ts        the save form's own contract
+├── patterns.ts                  shared field patterns
+└── user.ts                      contact row shape
 
 types/
 ├── api.ts                       request/response contract
@@ -317,6 +324,21 @@ tests/                           Vitest
 | `currentDateTime` | string | yes      | `2026-09-09T17:20:00+05:30`   |
 | `provider`        | string | no       | `openai` or `deepgram`        |
 | `history`         | string | no       | JSON array of earlier transcripts |
+| `displayedContactIds` | string | no   | `[101,102,103]`               |
+| `selectedContactId`   | string | no   | `102`                         |
+
+`selectedContactId` is the choice already in effect, echoed back so it survives a
+turn that says nothing about it. Omit it when nothing is selected; a present but
+unparseable value is a 400 rather than a silent reset, since treating it as "nothing
+selected" would discard the user's pick. It is verified against the current matches
+before being honoured.
+
+`displayedContactIds` is the result list currently on screen, in display order, so
+that "the third one" resolves against exactly what the user can see rather than
+against whatever the next search happens to return. Absent or empty means no list is
+showing, and a selection cannot be honoured. Over-long lists are truncated to 25
+(the display cap) rather than rejected; a malformed one is a 400, since silently
+resetting it would shift every position by an unknown amount.
 
 `history` is the transcripts of earlier turns, echoed back from the previous
 response — the only thing carried between turns. Absent means "first turn".
@@ -359,7 +381,7 @@ cannot quietly bill a different vendor than the caller intended.
   "search": {
     "mode": "select",
     "total": 2,
-    "threshold": 5,
+    "threshold": 3,
     "selectedContactId": null,
     "contacts": [
       {
@@ -369,7 +391,10 @@ cannot quietly bill a different vendor than the caller intended.
         "score": 1, "matchedFields": ["fname", "lname", "city"]
       }
     ]
-  }
+  },
+  "selectedContactId": 101,
+  "selectedPosition": 1,
+  "selectionWarning": null
 }
 ```
 
@@ -377,9 +402,49 @@ cannot quietly bill a different vendor than the caller intended.
 model's complete merged view — replace it wholesale, never combine it with a
 previous value.
 
+The response shape is the same whether or not the turn chose a result, deliberately:
+it was briefly a discriminated union on `kind`, and the selection variant dropped the
+merged criteria. The three selection fields are always present instead.
+
+- `selectedContactId` is the chosen contact, from a spoken position when there was
+  one and otherwise from `search.selectedContactId` — a lone match is auto-selected.
+- `selectedPosition` is non-null only when a spoken position was applied, so the UI
+  can say *why* a row is selected.
+- `selectionWarning` explains a position that could not be applied: out of range, or
+  pointing at someone the same sentence's criteria filtered out. The turn still
+  succeeds, criteria and all.
+
 `search.mode` is one of `idle` (no contact filter yet), `refine`
 (`total >= threshold`), `select` (`total < threshold`) or `empty`. The threshold is
 echoed so the UI never hardcodes it.
+
+`mode` shapes the guidance, not the permissions. `refine` means "ask for another
+detail", and the UI says so, but the rows stay selectable and a spoken position is
+still honoured — the API never consulted `mode` when resolving one. The rows were
+briefly read-only while refining, which produced a state where saying "select the
+third one" worked, changed the selection server-side, and displayed nothing.
+
+The refinement warning also clears as soon as a row is selected. It exists to ask
+the user to narrow the list; once they have picked someone they have answered it, and
+leaving it visible reads as an unresolved problem rather than guidance.
+
+### Where the record button lives
+
+First turn only, the capture controls sit in the opening card. From the second turn
+they move inside the matches card, under the list they refine, so choosing a person
+and correcting the search happen in one place. The engine picker stays at the top
+throughout — it is a setting for the whole conversation, not part of a turn.
+
+`ContactResults` takes those controls as a `footer` node rather than building them,
+so it still knows nothing about recording. `VoiceExtractor` defines them once and
+renders them in exactly one of the two slots, never both: two live regions and two
+submit buttons bound to one `MediaRecorder` would be a genuine bug, not a cosmetic
+one.
+
+The slot is chosen on `search.contacts.length > 0`, not on `mode`, because that is
+precisely when `ContactResults` renders a card at all — the `idle` and `empty`
+outcomes carry no rows. Keying off the mode would strand the controls on a turn that
+matched nobody, leaving no way to speak again.
 
 ### `POST /api/meetings`
 
@@ -494,6 +559,75 @@ reappear on the next turn — the edit has nowhere to live.
 transcript list that produced them. Corrections are spoken: say the value again, or
 say to start over.
 
+### Choosing a result by voice
+
+Results are numbered on screen, and saying **"select the third one"** picks that
+row. The model decides whether a turn was search detail or a choice, from the same
+call — it receives the numbered list alongside the conversation.
+
+Two rules make it correct:
+
+- **The list sends positions, not ids.** The model sees `1. Tharaka Perera` and
+  answers `3`; the application maps that back to a record. The boundary that only
+  the database resolves identifiers still holds.
+- **A selection is an extra signal, not an alternative path.** Every turn does the
+  same three things — join the conversation, re-derive the merged criteria from the
+  whole history, and search. A position is then applied on top of that result.
+
+That second rule is the fix for a real bug. Intent was first modelled as either/or,
+with the selection branch returning early. "Select the second one and schedule a
+meeting for her on September 10, 2026 at 2 p.m." then picked the right person and
+threw the date and time away — and because the sentence was also kept out of the
+history, no later turn could recover them. A sentence can be both a choice and new
+information, so both halves are always used.
+
+Applying a position on top of a fresh search does mean the two can disagree, since
+the same sentence may narrow the search past the person it pointed at. That yields
+`selectionWarning` in the response, not an error: failing the turn would discard the
+criteria as well, which is the bug above all over again.
+
+**Selection is positional only** — "the third one", "number two", "the last one".
+Descriptive phrases like "the Galle one" are treated as search detail instead, which
+reaches the same person by a safer route: `city = Galle` narrows the search to one
+result, and a single result is preselected automatically.
+
+That limit is deliberate. Descriptive selection was built and abandoned: the model
+could not be made reliable in both directions at once. Instructions loose enough to
+resolve an unambiguous description also made it pick one of three matching rows,
+and instructions strict enough to stop that also stopped the unambiguous case.
+Positional references have no such ambiguity, so that is all the prompt claims.
+
+Three guards keep a misread from silently picking someone. `normalizeConversationTurn`
+collapses any unexpected intent to `criteria`, because a criteria turn misread as a
+selection picks a person, while the reverse just asks the user to repeat. The other
+two live in `resolveSelectionIntent`, which downgrades a selection to criteria unless:
+
+- **There is a list.** Asked to read "select the third one" with nothing on screen,
+  the model still answers `selection`. No prompt wording suppressed it reliably.
+- **The newest utterance actually names a position.** Since selection wording now
+  stays in the history, the model will re-fire on a message from three turns back
+  and re-apply a stale position to a list that has since changed. `mentionsSelection`
+  is a plain regex check on the latest transcript only.
+
+Note the direction of that second gate: it can only *block* a selection, never cause
+one. The model still decides which position was meant, so a false positive costs
+nothing — "she lives on 3rd Street" opens the gate, and the model answers `criteria`
+anyway. That asymmetry is why the regex leans permissive; the live suite asserts the
+model's half.
+
+**A selection outlives the sentence that made it.** Most turns say nothing about who
+was picked, so the choice is carried forward: the client echoes `selectedContactId`
+back each turn, exactly as it echoes `history`. Without that, "select the third one"
+followed by "schedule it for 4pm" would lose the third one, because the second
+sentence names no position and `resolveContactSearch` only auto-selects a *lone*
+row — with several matches still on screen the answer would come back null.
+
+The carried id is re-checked, not trusted. `keepCarriedSelection` requires it to be
+among the current matches, since it arrives from the client and the same turn's
+criteria may have narrowed the list past that person. When it is dropped for that
+reason the response carries a `selectionWarning`, because silently losing a pick is
+what made this hard to notice.
+
 One consequence to know about: because only an explicit restatement overrides a
 field, switching person mid-conversation keeps the previous person's location.
 "Find Amanda in Austin" then "actually find Eric Poe" yields Eric Poe **in
@@ -514,8 +648,8 @@ which is why a turn that supplies only a date never triggers a directory search.
 
 ### The threshold
 
-`MATCH_THRESHOLD` in `lib/config.ts`, currently 5. The comparison is
-`total >= threshold`, so exactly five matches still asks for more detail and four
+`MATCH_THRESHOLD` in `lib/config.ts`, currently 3. The comparison is
+`total >= threshold`, so exactly three matches still asks for more detail and two
 offers selection. The value is echoed in every response rather than duplicated in
 the UI.
 
@@ -619,9 +753,11 @@ reject.
 **Schemas are swappable.** `schemas/extraction-schema.ts` defines a descriptor:
 a Zod schema, a strict JSON Schema, prompt guidance, and an optional normaliser.
 `lib/openai/extract-structured.ts` is generic over it. Moving to a richer shape
-means adding a descriptor and changing one import in
-`extract-meeting-request.ts` — no pipeline or route changes. A test asserts the Zod
-and JSON schemas stay in step, since they are maintained side by side.
+means adding a descriptor and changing one import in `interpret-turn.ts` — no
+pipeline or route changes. `conversationTurnExtractionSchema` is exactly that: it
+nests `meetingRequestJsonSchema` under `request` and adds `intent` and `position`
+around it, without the criteria schema knowing it has been wrapped. A test asserts
+the Zod and JSON schemas stay in step, since they are maintained side by side.
 
 **Normalise, then validate.** `normalizeMeetingRequest` deterministically repairs
 formatting the model may get slightly wrong: padding `2026-9-20`, stripping seconds

@@ -16,9 +16,26 @@ import {
 
 type CriteriaField = ContactField | MeetingField;
 
+/**
+ * Everything the user has said, including commands.
+ *
+ * Display only. Commands are shown but never sent to the model, so this list is
+ * intentionally *not* the same as the transcript history that drives extraction.
+ */
+export type Utterance = {
+  text: string;
+  /**
+   * The position this sentence chose, when it chose one.
+   *
+   * Every utterance is a real turn — a sentence can name a position *and* carry
+   * criteria — so this is a badge on the turn, not a separate category.
+   */
+  selectedPosition: number | null;
+};
+
 type ConversationSummaryProps = {
-  /** Every turn so far, oldest first. The real state of the conversation. */
-  transcripts: string[];
+  /** Everything heard, oldest first, commands included. */
+  utterances: Utterance[];
   /** The model's merged view. Read-only here. */
   state: ConversationState;
 };
@@ -56,7 +73,7 @@ function ValueRow({ field, value }: { field: CriteriaField; value: string }) {
  * heard.
  */
 export function ConversationSummary({
-  transcripts,
+  utterances,
   state,
 }: ConversationSummaryProps) {
   const contactFields = populatedContactFields(state);
@@ -66,13 +83,13 @@ export function ConversationSummary({
     (field) => !contactFields.includes(field),
   );
 
-  if (transcripts.length === 0) return null;
+  if (utterances.length === 0) return null;
+
+  const criteriaTurns = utterances.length;
 
   return (
     <Card>
-      <CardTitle
-        hint={transcripts.length === 1 ? "1 turn" : `${transcripts.length} turns`}
-      >
+      <CardTitle hint={criteriaTurns === 1 ? "1 turn" : `${criteriaTurns} turns`}>
         Understood so far
       </CardTitle>
 
@@ -133,26 +150,37 @@ export function ConversationSummary({
             Conversation
           </p>
 
+          {/* Every utterance is a numbered turn. A sentence that also chose a
+              result gets a badge rather than being pushed out of the sequence,
+              because it contributed criteria too. */}
           <ol className="space-y-1.5">
-            {transcripts.map((transcript, index) => (
+            {utterances.map((utterance, index) => (
               <li
-                key={`${index}-${transcript.slice(0, 24)}`}
-                className="flex gap-2 text-sm text-slate-700 dark:text-slate-300"
+                key={`${index}-${utterance.text.slice(0, 24)}`}
+                className="flex gap-2 text-sm"
               >
                 <span
                   aria-hidden="true"
-                  className="mt-0.5 shrink-0 text-xs font-medium tabular-nums text-slate-400 dark:text-slate-500"
+                  className="mt-0.5 w-4 shrink-0 text-xs font-medium tabular-nums text-slate-400 dark:text-slate-500"
                 >
                   {index + 1}.
                 </span>
-                <span>{transcript}</span>
+
+                <span className="text-slate-700 dark:text-slate-300">
+                  {utterance.text}
+                  {utterance.selectedPosition !== null ? (
+                    <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300">
+                      selected #{utterance.selectedPosition}
+                    </span>
+                  ) : null}
+                </span>
               </li>
             ))}
           </ol>
 
           <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-            To change something, say it again — the latest mention wins. Say or press
-            Start over to clear everything.
+            To change something, say it again — the latest mention wins. You can pick
+            a result and give meeting details in the same sentence.
           </p>
         </div>
       </div>

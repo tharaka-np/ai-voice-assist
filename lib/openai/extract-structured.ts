@@ -2,7 +2,10 @@ import "server-only";
 
 import { AppError } from "@/lib/errors";
 import { getExtractionModel, getOpenAIClient } from "@/lib/openai/client";
-import { buildExtractionMessages } from "@/lib/prompt/messages";
+import {
+  buildExtractionMessages,
+  type SelectableCandidate,
+} from "@/lib/prompt/messages";
 import type { ExtractionSchemaDefinition } from "@/schemas/extraction-schema";
 
 export type ExtractionContext = {
@@ -18,6 +21,13 @@ export type ExtractionContext = {
   currentDateTime: string;
   /** IANA identifier, e.g. `Asia/Colombo`. */
   timezone: string;
+  /**
+   * The numbered results currently on screen, if any.
+   *
+   * Present so the model can tell "add this detail" apart from "pick that one".
+   * Carries positions and names only — never record ids.
+   */
+  candidates?: readonly SelectableCandidate[];
 };
 
 /**
@@ -51,6 +61,7 @@ export async function extractStructured<TOutput>(
         transcripts: context.transcripts,
         currentDateTime: context.currentDateTime,
         timezone: context.timezone,
+        candidates: context.candidates,
       }),
       response_format: {
         type: "json_schema",

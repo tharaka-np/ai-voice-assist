@@ -47,10 +47,16 @@ export function MeetingForm({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [showValidation, setShowValidation] = useState(false);
 
-  // No effect syncs these back to `state`: the parent keys this component on the
-  // contact id, so a different selection remounts it and re-reads the initial
-  // values. That is the documented way to reset state on a prop change and avoids
-  // the cascading render an effect-based reset would cause.
+  // These are seeded from `state` on mount and never synced by an effect. The parent
+  // keys this component on the contact id *and* the meeting details, so a new
+  // selection or a newly spoken date, time or purpose remounts it and re-reads the
+  // initial values. That is the documented way to reset state on a prop change, and
+  // it avoids the cascading render an effect-based reset would cause.
+  //
+  // The consequence is that a later turn changing any of the three replaces all
+  // three, typing included. That is the intended precedence: the conversation is the
+  // source of truth for these values, and this form is a confirmation step for what
+  // the conversation produced rather than an independent editor.
 
   const validation = useMemo(
     () =>
