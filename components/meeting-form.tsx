@@ -2,28 +2,21 @@
 
 import { useCallback, useMemo, useState } from "react";
 
-import { UserPicker } from "@/components/user-picker";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
-import { formatMeetingDate, formatMeetingTime } from "@/lib/format";
-import type {
-  ResolutionStatus,
-  UserCandidate,
-} from "@/lib/matching/name-match";
+import { formatMeetingDate, formatMeetingTime, maskPhone } from "@/lib/format";
+import type { ContactCandidate } from "@/lib/matching/contact-match";
 import { MeetingSubmissionSchema } from "@/schemas/meeting-submission";
-import type {
-  CreateMeetingResponse,
-  NameMatchMeta,
-  SavedMeeting,
-} from "@/types/api";
-import type { MeetingInfo } from "@/schemas/meeting";
+import type { ConversationState } from "@/schemas/meeting-request";
+import type { CreateMeetingResponse, SavedMeeting } from "@/types/api";
 
 type MeetingFormProps = {
-  /** What the model proposed. Used only as initial values. */
-  proposed: MeetingInfo;
-  nameMatch: NameMatchMeta;
+  contact: ContactCandidate;
+  /** Accumulated state; supplies the initial date, time and description. */
+  state: ConversationState;
   onSaved: (meeting: SavedMeeting) => void;
+  onChangeContact: () => void;
 };
 
 const FIELD_CLASSES =
@@ -33,40 +26,44 @@ const FIELD_CLASSES =
   "dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100";
 
 /**
- * The confirmation step: review, correct, then save.
+ * Final confirmation before the only write in the application.
  *
- * Every proposed value is editable, and nothing is written until the user
- * submits. Date and time are required because `meetings` declares them NOT NULL,
- * so a recording that never stated a time has to be completed here — which is
- * the "never guess" rule resolving at the human step rather than with a default.
+ * Shows the chosen contact alongside the meeting details, all editable. The
+ * `meetings` table declares date, time and description NOT NULL, so anything the
+ * conversation never supplied has to be filled in here — the "never guess" rule
+ * resolving at the human step rather than with a silent default.
  */
-export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) {
-  const [candidates, setCandidates] = useState<UserCandidate[]>(
-    nameMatch.candidates,
-  );
-  const [status, setStatus] = useState<ResolutionStatus>(nameMatch.status);
-  const [userId, setUserId] = useState<number | null>(nameMatch.selectedUserId);
-
-  const [date, setDate] = useState(proposed.meetingDate ?? "");
-  const [time, setTime] = useState(proposed.meetingTime ?? "");
-  const [description, setDescription] = useState(proposed.notes ?? "");
+export function MeetingForm({
+  contact,
+  state,
+  onSaved,
+  onChangeContact,
+}: MeetingFormProps) {
+  const [date, setDate] = useState(state.meetingDate);
+  const [time, setTime] = useState(state.meetingTime);
+  const [description, setDescription] = useState(state.notes);
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [showValidation, setShowValidation] = useState(false);
 
-  // Note: there is deliberately no effect syncing these fields back to
-  // `proposed`. The parent gives this component a `key` that changes on every
-  // extraction, so React remounts it and the initial state above is re-read.
-  // That is the documented way to reset state when a prop changes, and it avoids
+  // No effect syncs these back to `state`: the parent keys this component on the
+  // contact id, so a different selection remounts it and re-reads the initial
+  // values. That is the documented way to reset state on a prop change and avoids
   // the cascading render an effect-based reset would cause.
 
   const validation = useMemo(
-    () => MeetingSubmissionSchema.safeParse({ userId, date, time, description }),
-    [userId, date, time, description],
+    () =>
+      MeetingSubmissionSchema.safeParse({
+        userId: contact.id,
+        date,
+        time,
+        description,
+      }),
+    [contact.id, date, time, description],
   );
 
-  /** Field errors, surfaced only after a submit attempt to avoid nagging. */
+  /** Surfaced only after a submit attempt, so the form does not nag while typing. */
   const fieldErrors = useMemo(() => {
     if (validation.success || !showValidation) return {};
 
@@ -78,17 +75,9 @@ export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) 
     return errors;
   }, [showValidation, validation]);
 
-  const handleCandidatesReplaced = useCallback(
-    (
-      nextCandidates: UserCandidate[],
-      nextSelected: number | null,
-      nextStatus: ResolutionStatus,
-    ) => {
-      setCandidates(nextCandidates);
-      setStatus(nextStatus);
-      setUserId(nextSelected);
-    },
-    [],
+  const missingCount = useMemo(
+    () => [date, time, description].filter((value) => value.trim() === "").length,
+    [date, time, description],
   );
 
   const handleSubmit = useCallback(async () => {
@@ -127,28 +116,49 @@ export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) 
     }
   }, [isSaving, onSaved, validation]);
 
-  const selectedLabel = candidates.find(
-    (candidate) => candidate.id === userId,
-  )?.label;
-
   return (
     <Card>
-      <CardTitle hint="Step 2">Review and save</CardTitle>
+      <CardTitle hint="Final step">Confirm and schedule</CardTitle>
 
       <div className="space-y-5">
-        <UserPicker
-          status={status}
-          candidates={candidates}
-          selectedUserId={userId}
-          searchedFor={nameMatch.searchedFor}
-          disabled={isSaving}
-          onSelect={setUserId}
-          onCandidatesReplaced={handleCandidatesReplaced}
-        />
+        <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-900 dark:bg-indigo-950/40">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-wide text-indigo-500 dark:text-indigo-400">
+                Selected contact
+              </p>
+              <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+                {contact.label}
+              </p>
+              <p className="text-xs text-slate-600 dark:text-slate-400">
+                {contact.city}
+                {contact.state !== "" ? `, ${contact.state}` : ""} ·{" "}
+                {contact.email} · {maskPhone(contact.phoneNumber)}
+              </p>
+            </div>
 
-        {fieldErrors.userId !== undefined ? (
-          <p role="alert" className="text-xs text-rose-600 dark:text-rose-400">
-            {fieldErrors.userId}
+            <button
+              type="button"
+              onClick={onChangeContact}
+              disabled={isSaving}
+              className="text-xs font-medium text-indigo-600 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-indigo-400"
+            >
+              Change
+            </button>
+          </div>
+        </div>
+
+        {missingCount > 0 && !showValidation ? (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            The conversation didn&apos;t mention{" "}
+            {[
+              date.trim() === "" ? "a date" : null,
+              time.trim() === "" ? "a time" : null,
+              description.trim() === "" ? "a purpose" : null,
+            ]
+              .filter((item): item is string => item !== null)
+              .join(" or ")}
+            . Fill that in before scheduling.
           </p>
         ) : null}
 
@@ -182,8 +192,7 @@ export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) 
               </p>
             ) : (
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                {formatMeetingDate(date === "" ? null : date) ??
-                  "Not mentioned — please fill this in"}
+                {date === "" ? "Required" : formatMeetingDate(date)}
               </p>
             )}
           </div>
@@ -217,8 +226,7 @@ export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) 
               </p>
             ) : (
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                {formatMeetingTime(time === "" ? null : time) ??
-                  "Not mentioned — please fill this in"}
+                {time === "" ? "Required" : formatMeetingTime(time)}
               </p>
             )}
           </div>
@@ -229,7 +237,7 @@ export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) 
             htmlFor="meeting-description"
             className="block text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400"
           >
-            Description
+            Notes
           </label>
           <textarea
             id="meeting-description"
@@ -237,7 +245,7 @@ export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) 
             value={description}
             disabled={isSaving}
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="What was this meeting about?"
+            placeholder="What is this meeting about?"
             className={`mt-1 resize-y ${FIELD_CLASSES}`}
             aria-invalid={fieldErrors.description !== undefined}
             aria-describedby={
@@ -264,14 +272,9 @@ export function MeetingForm({ proposed, nameMatch, onSaved }: MeetingFormProps) 
         ) : null}
 
         <div className="flex flex-wrap items-center gap-3">
-          {/* Labelled with the side effect rather than a generic "Submit", so
-              what is about to happen is obvious before the click. */}
+          {/* Labelled with the side effect rather than a generic "Submit". */}
           <Button onClick={handleSubmit} disabled={isSaving}>
-            {isSaving
-              ? "Saving…"
-              : selectedLabel === undefined
-                ? "Save meeting"
-                : `Save meeting for ${selectedLabel}`}
+            {isSaving ? "Saving…" : `Schedule meeting with ${contact.label}`}
           </Button>
 
           <span

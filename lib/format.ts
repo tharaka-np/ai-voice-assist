@@ -1,4 +1,4 @@
-import { HH_MM_PATTERN, ISO_DATE_PATTERN } from "@/schemas/meeting";
+import { HH_MM_PATTERN, ISO_DATE_PATTERN } from "@/schemas/patterns";
 
 /**
  * Presentation helpers. Pure and deterministic so they can run in a server
@@ -75,4 +75,25 @@ export function resolveBrowserTimeZone(): string {
   } catch {
     return "UTC";
   }
+}
+
+/**
+ * Shows only the last four digits of a phone number.
+ *
+ * The directory is fictional, but a contact list is exactly the kind of screen
+ * that gets shared in a demo or a screenshot, and the last four digits are enough
+ * to tell two people apart.
+ */
+export function maskPhone(value: string): string {
+  const digits = value.replace(/\D+/g, "");
+  if (digits.length === 0) return "";
+  if (digits.length <= 4) return digits;
+
+  return `••• ••• ${digits.slice(-4)}`;
+}
+
+/** `male` -> `Male`. Used for the gender criterion chip. */
+export function formatGender(value: string): string {
+  if (value === "") return "";
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }

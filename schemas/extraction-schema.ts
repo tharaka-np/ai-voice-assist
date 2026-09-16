@@ -54,13 +54,33 @@ export function defineExtractionSchema<TOutput>(
 }
 
 /**
- * A JSON Schema property that accepts a string or an explicit null. OpenAI
- * strict mode requires every property to be present in `required`, so
- * "optional" is expressed as a nullable type rather than by omission.
+ * A required JSON Schema string property.
+ *
+ * OpenAI strict mode requires every property to appear in `required`, so
+ * "absent" cannot be expressed by omission. The conversational flow expresses it
+ * as an empty string instead of a null, because empty is the value the merge
+ * rules treat as "not stated in this turn".
  */
-export function nullableString(description: string) {
+export function describedString(description: string) {
   return {
-    type: ["string", "null"],
+    type: "string",
+    description,
+  } as const;
+}
+
+/**
+ * A required JSON Schema string constrained to a fixed set.
+ *
+ * Include `""` in `values` when the field is optional, for the same reason as
+ * above: strict mode has no way to omit a property.
+ */
+export function enumString(
+  description: string,
+  values: readonly string[],
+) {
+  return {
+    type: "string",
+    enum: [...values],
     description,
   } as const;
 }

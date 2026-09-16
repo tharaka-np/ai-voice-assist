@@ -1,16 +1,21 @@
-import type {
-  ResolutionStatus,
-  UserCandidate,
-} from "@/lib/matching/name-match";
+import type { ContactSearchOutcome } from "@/lib/matching/contact-match";
 import type { TranscriptionProviderId } from "@/lib/transcription/types";
-import type { MeetingInfo } from "@/schemas/meeting";
+import type {
+  ConversationState,
+  MeetingRequest,
+} from "@/schemas/meeting-request";
 
 /**
  * Wire contracts for the API routes.
  *
- * Every response is a discriminated union on `success`, so the client narrows
- * with one check and cannot read data off a failed response.
+ * Every response is a discriminated union on `success`, so the client narrows with
+ * one check and cannot read data off a failed response.
  */
+
+export type ApiFailure = {
+  success: false;
+  error: string;
+};
 
 /** Which engine produced the transcript, for side-by-side comparison. */
 export type TranscriptionMeta = {
@@ -22,34 +27,26 @@ export type TranscriptionMeta = {
   keytermCount: number;
 };
 
-/** Ranked directory matches for the name heard in the recording. */
-export type NameMatchMeta = {
-  status: ResolutionStatus;
-  /** Preselected user, or null whenever the choice belongs to the human. */
-  selectedUserId: number | null;
-  candidates: UserCandidate[];
-  /** The name the extractor heard, echoed back for the "no match" message. */
-  searchedFor: string | null;
-};
-
 // ---------------------------------------------------------------------------
-// POST /api/process-audio
+// POST /api/process-audio  — one conversational turn
 // ---------------------------------------------------------------------------
 
 export type ProcessAudioSuccess = {
   success: true;
   transcript: string;
   transcription: TranscriptionMeta;
-  data: MeetingInfo;
-  nameMatch: NameMatchMeta;
+  /**
+   * Only what this turn stated. Returned alongside the merged state so the UI can
+   * show what the latest sentence actually contributed, which is the difference
+   * between "it ignored me" and "it already knew that".
+   */
+  latestTurn: MeetingRequest;
+  /** Accumulated state after merging this turn into the previous one. */
+  state: ConversationState;
+  search: ContactSearchOutcome;
 };
 
-export type ProcessAudioFailure = {
-  success: false;
-  error: string;
-};
-
-export type ProcessAudioResponse = ProcessAudioSuccess | ProcessAudioFailure;
+export type ProcessAudioResponse = ProcessAudioSuccess | ApiFailure;
 
 /** Field names of the multipart request body. */
 export const PROCESS_AUDIO_FIELDS = {
@@ -57,20 +54,26 @@ export const PROCESS_AUDIO_FIELDS = {
   timezone: "timezone",
   currentDateTime: "currentDateTime",
   provider: "provider",
+  /** JSON-encoded accumulated state from previous turns. Optional on turn one. */
+  state: "state",
 } as const;
 
 // ---------------------------------------------------------------------------
-// GET /api/users/search
+// POST /api/contacts/search  — rerun the search without speaking
 // ---------------------------------------------------------------------------
 
-export type UserSearchSuccess = {
+/**
+ * Used when the user edits the criteria directly, for example removing a chip the
+ * extractor got wrong. Takes the state rather than a query string because the
+ * search is over eight fields, not one.
+ */
+export type ContactSearchSuccess = {
   success: true;
-  status: ResolutionStatus;
-  selectedUserId: number | null;
-  candidates: UserCandidate[];
+  state: ConversationState;
+  search: ContactSearchOutcome;
 };
 
-export type UserSearchResponse = UserSearchSuccess | ProcessAudioFailure;
+export type ContactSearchResponse = ContactSearchSuccess | ApiFailure;
 
 // ---------------------------------------------------------------------------
 // POST /api/meetings
@@ -92,4 +95,4 @@ export type CreateMeetingSuccess = {
   meeting: SavedMeeting;
 };
 
-export type CreateMeetingResponse = CreateMeetingSuccess | ProcessAudioFailure;
+export type CreateMeetingResponse = CreateMeetingSuccess | ApiFailure;

@@ -1,31 +1,31 @@
 import { NextResponse } from "next/server";
 
 import { validateProcessAudioForm } from "@/lib/audio/validation";
-import { searchUsersByName } from "@/lib/db/users";
+import { searchContacts } from "@/lib/db/contacts";
 import { AppError, logServerError, toPublicError } from "@/lib/errors";
-import { extractMeetingInfo } from "@/lib/openai/extract-meeting-info";
+import { extractMeetingRequest } from "@/lib/openai/extract-meeting-request";
 import {
   getDefaultTranscriptionProviderId,
   getTranscriptionProvider,
 } from "@/lib/transcription/registry";
 import { TRANSCRIPTION_PROVIDER_META } from "@/lib/transcription/types";
 import { getConfiguredKeyterms } from "@/lib/transcription/vocabulary";
+import { mergeConversationState } from "@/schemas/meeting-request";
 import type { ProcessAudioResponse } from "@/types/api";
 
 /**
- * Audio → transcript → structured data.
+ * One turn of a conversational contact search.
  *
- * The browser never talks to a provider: this handler is the only place
- * credentials exist. It stays thin on purpose, delegating validation to
- * `lib/audio/validation`, transcription to whichever adapter the caller
- * selected, and extraction to `lib/openai/extract-meeting-info`.
+ * Audio → transcript → this turn's fields → merged state → directory search.
+ *
+ * The turn is stateless from the model's point of view: it sees only the latest
+ * transcript and returns only what that transcript stated. Accumulation happens in
+ * `mergeConversationState`, which keeps the state deterministic and stops the
+ * model from dropping or reinventing a value it was never shown.
+ *
+ * `pg` and the OpenAI SDK both need TCP sockets, which the edge runtime lacks.
  */
-
-// Uses the Node.js runtime: the OpenAI SDK's file upload path and `File`
-// handling are exercised far more widely there than on the edge runtime.
 export const runtime = "nodejs";
-
-// Nothing here is cacheable; every request carries a unique recording.
 export const dynamic = "force-dynamic";
 
 export async function POST(
@@ -47,42 +47,36 @@ export async function POST(
       });
     }
 
-    // Step 1 — validate the upload, the time context and the provider choice.
-    const { audio, timezone, currentDateTime, providerId } =
+    // Step 1 — validate the upload, the time context, the provider choice and the
+    // accumulated state echoed back from earlier turns.
+    const { audio, timezone, currentDateTime, providerId, previousState } =
       validateProcessAudioForm(formData);
 
-    // Step 2 — speech to text through the selected adapter. Resolved by id, so
-    // the handler has no knowledge of any specific vendor.
+    // Step 2 — speech to text through the selected adapter.
     const provider = getTranscriptionProvider(
       providerId ?? getDefaultTranscriptionProviderId(),
     );
-
-    // Proper-noun hints are assembled by the caller, not the adapter, because in
-    // a CRM integration this is where a per-user record lookup would happen.
-    // Adapters without an equivalent feature ignore the option.
     const transcription = await provider.transcribe(audio, {
       keyterms: getConfiguredKeyterms(),
     });
 
-    // Step 3 — schema-constrained extraction, validated with Zod before it is
-    // allowed anywhere near the response.
-    const data = await extractMeetingInfo({
+    // Step 3 — extract only what this turn said. Empty strings everywhere else.
+    const latestTurn = await extractMeetingRequest({
       transcript: transcription.transcript,
       currentDateTime,
       timezone,
     });
 
-    // Step 4 — resolve the extracted name against the directory. The model
-    // supplies a name string only; the database is the sole authority on which
-    // record that maps to, and ambiguity is handed back to the user rather than
-    // guessed at here.
-    const nameMatch =
-      data.name === null
-        ? { status: "unresolved" as const, selectedUserId: null, candidates: [] }
-        : await searchUsersByName(data.name);
+    // Step 4 — fold it into what we already knew. Empty incoming values never
+    // erase an earlier answer; non-empty ones replace it.
+    const state = mergeConversationState(previousState, latestTurn);
+
+    // Step 5 — search on every populated contact field. Meeting fields are
+    // excluded by construction inside `buildContactFilters`.
+    const search = await searchContacts(state);
 
     console.info(
-      `[process-audio] ok provider=${transcription.providerId} ms=${Date.now() - startedAt} bytes=${audio.size}`,
+      `[process-audio] ok provider=${transcription.providerId} ms=${Date.now() - startedAt} bytes=${audio.size} mode=${search.mode} total=${search.total}`,
     );
 
     return NextResponse.json(
@@ -96,8 +90,9 @@ export async function POST(
           latencyMs: transcription.latencyMs,
           keytermCount: transcription.keytermCount,
         },
-        data,
-        nameMatch: { ...nameMatch, searchedFor: data.name },
+        latestTurn,
+        state,
+        search,
       },
       { status: 200 },
     );
