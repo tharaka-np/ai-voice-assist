@@ -28,25 +28,58 @@ export type TranscriptionMeta = {
 // POST /api/process-audio  — one conversational turn
 // ---------------------------------------------------------------------------
 
-export type ProcessAudioSuccess = {
+type TurnBase = {
   success: true;
-  /** Just this turn's speech. */
+  /** Just this turn's speech. Always returned, so the UI can echo it back. */
   transcript: string;
   /**
-   * The whole conversation, already truncated, for the client to send back next
-   * turn. This is the only thing carried between turns — the extracted fields are
+   * The conversation to send back next turn, already truncated.
+   *
+   * This is the only thing carried between turns — the extracted fields are
    * re-derived from it by the model, not accumulated by the client.
+   *
+   * Every turn joins it, including one that named a position, because the same
+   * sentence may also carry criteria. Re-selection from a stale message is
+   * prevented by the prompt rule that only the final message can be a selection,
+   * and by verifying the chosen contact still matches.
    */
   transcripts: string[];
   transcription: TranscriptionMeta;
+};
+
+/**
+ * One shape for every turn, because a turn is not one thing or the other.
+ *
+ * "Select the second one and schedule a meeting for her at 2pm" is a selection
+ * *and* new meeting details. An earlier version modelled these as alternatives and
+ * silently dropped the meeting details from exactly that sentence. Criteria are now
+ * always extracted and always searched; a spoken position is an additional signal
+ * applied on top.
+ */
+export type ProcessAudioSuccess = TurnBase & {
   /**
    * The model's complete merged view as of the latest message.
    *
-   * Replaced wholesale on every turn. The client must not combine this with a
-   * previous value; the merge already happened inside the model.
+   * Replaced wholesale. The client must not combine it with a previous value;
+   * the merge already happened inside the model.
    */
   state: ConversationState;
   search: ContactSearchOutcome;
+  /**
+   * The contact to select, if any: either resolved from a spoken position, or the
+   * lone remaining result auto-selected by the search.
+   */
+  selectedContactId: number | null;
+  /** The position the user named, when they named one. For the confirmation line. */
+  selectedPosition: number | null;
+  /**
+   * Set when a position was named but could not be honoured — out of range, or the
+   * chosen contact no longer matches after this turn's criteria narrowed the list.
+   *
+   * A warning rather than an error: the criteria in the same sentence are still
+   * valid and must not be thrown away with the bad position.
+   */
+  selectionWarning: string | null;
 };
 
 export type ProcessAudioResponse = ProcessAudioSuccess | ApiFailure;
@@ -59,6 +92,13 @@ export const PROCESS_AUDIO_FIELDS = {
   provider: "provider",
   /** JSON array of earlier transcripts, oldest first. Absent on turn one. */
   history: "history",
+  /** JSON array of contact ids in the order currently displayed. */
+  displayedContactIds: "displayedContactIds",
+  /**
+   * The contact already selected, so the choice survives turns that say nothing
+   * about it. Omitted when nothing is selected.
+   */
+  selectedContactId: "selectedContactId",
 } as const;
 
 // ---------------------------------------------------------------------------

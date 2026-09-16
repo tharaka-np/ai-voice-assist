@@ -241,3 +241,59 @@ export async function searchContacts(
     parsed.map((row) => toCandidate(row, scoreAliases)),
   );
 }
+
+/**
+ * Loads specific contacts, preserving the order the caller asked for.
+ *
+ * `array_position` keeps the rows in the browser's display order, which is what
+ * makes an ordinal meaningful: "the third one" has to mean the third row the user
+ * can actually see. Re-deriving the order server-side would risk an off-by-one
+ * against the screen.
+ *
+ * Unknown ids are simply absent from the result, so a stale list shrinks rather
+ * than shifting every position.
+ */
+const CONTACTS_BY_IDS_SQL = `
+  SELECT
+    users.id,
+    users.fname,
+    users.lname,
+    users.street,
+    users.city,
+    users.state,
+    users.phone_number,
+    users.email,
+    users.gender
+  FROM users
+  WHERE users.id = ANY($1::int[])
+  ORDER BY array_position($1::int[], users.id)
+`;
+
+export async function findContactsByIds(
+  ids: readonly number[],
+): Promise<ContactCandidate[]> {
+  if (ids.length === 0) return [];
+
+  const rows = await query(CONTACTS_BY_IDS_SQL, [[...ids]]);
+
+  return rows.map((raw) => {
+    const row = ContactRowSchema.parse(raw);
+
+    return {
+      id: row.id,
+      fname: row.fname,
+      lname: row.lname,
+      street: row.street,
+      city: row.city,
+      state: row.state,
+      phoneNumber: row.phone_number,
+      email: row.email,
+      gender: row.gender,
+      label: formatUserLabel(row.fname, row.lname),
+      // No filters ran, so there is no similarity to report. These rows are only
+      // ever used to resolve a spoken position, never ranked.
+      score: 1,
+      matchedFields: [],
+    };
+  });
+}

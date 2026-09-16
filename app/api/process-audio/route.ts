@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { validateProcessAudioForm } from "@/lib/audio/validation";
-import { searchContacts } from "@/lib/db/contacts";
+import { findContactsByIds, searchContacts } from "@/lib/db/contacts";
 import { AppError, logServerError, toPublicError } from "@/lib/errors";
-import { extractMeetingRequest } from "@/lib/openai/extract-meeting-request";
+import { keepCarriedSelection } from "@/lib/matching/contact-match";
+import { interpretConversationTurn } from "@/lib/openai/interpret-turn";
 import { truncateHistory } from "@/lib/prompt/messages";
 import {
   getDefaultTranscriptionProviderId,
@@ -11,21 +12,20 @@ import {
 } from "@/lib/transcription/registry";
 import { TRANSCRIPTION_PROVIDER_META } from "@/lib/transcription/types";
 import { getConfiguredKeyterms } from "@/lib/transcription/vocabulary";
-import type { ProcessAudioResponse } from "@/types/api";
+import type { ProcessAudioResponse, TranscriptionMeta } from "@/types/api";
 
 /**
  * One turn of a conversational contact search.
  *
- * Audio → transcript → append to history → extract from the WHOLE history →
- * directory search.
+ * Every turn does the same three things: join the conversation, re-derive the
+ * merged criteria from the whole history, and search. A spoken position is an
+ * *additional* signal applied on top, not an alternative path.
  *
- * The model performs the merge. It receives every transcript in the conversation
- * and returns the complete picture as of the latest message, so there is no
- * application-side merge and nothing but transcripts is carried between turns.
- *
- * The trade that buys: spoken corrections and replacements work naturally, at the
- * cost of determinism. Zod validation of the model's response is therefore the
- * only guard left before this data reaches the database.
+ * That matters because a sentence can be both. "Select the second one and schedule
+ * a meeting for her on September 10th at 2pm" names a position *and* supplies
+ * meeting details. An earlier version treated the two as mutually exclusive and
+ * returned early on a selection, which silently discarded the meeting details and
+ * did not even keep the utterance in history for a later turn to recover them.
  *
  * `pg` and the OpenAI SDK both need TCP sockets, which the edge runtime lacks.
  */
@@ -51,12 +51,17 @@ export async function POST(
       });
     }
 
-    // Step 1 — validate the upload, the time context, the provider choice and the
-    // transcript history echoed back from earlier turns.
-    const { audio, timezone, currentDateTime, providerId, history } =
-      validateProcessAudioForm(formData);
+    const {
+      audio,
+      timezone,
+      currentDateTime,
+      providerId,
+      history,
+      displayedContactIds,
+      selectedContactId: carriedSelection,
+    } = validateProcessAudioForm(formData);
 
-    // Step 2 — speech to text through the selected adapter.
+    // Step 1 — speech to text through the selected adapter.
     const provider = getTranscriptionProvider(
       providerId ?? getDefaultTranscriptionProviderId(),
     );
@@ -64,25 +69,90 @@ export async function POST(
       keyterms: getConfiguredKeyterms(),
     });
 
-    // Step 3 — this turn joins the conversation. Truncated here as well as in the
-    // prompt builder, so the array returned to the client cannot grow forever.
+    const transcriptionMeta: TranscriptionMeta = {
+      provider: transcription.providerId,
+      label: TRANSCRIPTION_PROVIDER_META[transcription.providerId].label,
+      model: transcription.model,
+      latencyMs: transcription.latencyMs,
+      keytermCount: transcription.keytermCount,
+    };
+
+    // Step 2 — the list the user is looking at, in the order they see it. A spoken
+    // position refers to this, not to whatever the search returns afterwards.
+    const shown = await findContactsByIds(displayedContactIds);
+
+    // Step 3 — this turn joins the conversation unconditionally, because even a
+    // sentence that names a position may also carry criteria.
     const transcripts = truncateHistory([...history, transcription.transcript]);
 
-    // Step 4 — the model reads the whole conversation and returns the merged
-    // state. A field nobody mentioned comes back empty; a field mentioned twice
-    // takes its latest value.
-    const state = await extractMeetingRequest({
+    const turn = await interpretConversationTurn({
       transcripts,
       currentDateTime,
       timezone,
+      // Position and name only. Selection is positional, so nothing more is
+      // needed, and no city, email, phone or street leaves the server.
+      candidates: shown.map((contact, index) => ({
+        position: index + 1,
+        label: contact.label,
+      })),
     });
 
-    // Step 5 — search on every populated contact field. Meeting fields are
-    // excluded by construction inside `buildContactFilters`.
+    // Step 4 — the criteria are always used, whatever the intent was.
+    const state = turn.request;
     const search = await searchContacts(state);
 
+    // Step 5 — work out who is selected, in order of authority:
+    //
+    //   1. a position named in this very sentence,
+    //   2. the selection already in effect, if it still matches,
+    //   3. a lone remaining result, auto-selected.
+    //
+    // Rule 2 is what makes a selection survive. Most turns say nothing about the
+    // choice — "schedule it for 4pm" names no position — and without it the answer
+    // would fall through to rule 3, which is null whenever more than one row
+    // matches. The user's pick would silently vanish one turn after they made it.
+    let selectedContactId =
+      keepCarriedSelection(carriedSelection, search.contacts) ??
+      search.selectedContactId;
+    let selectedPosition: number | null = null;
+    let selectionWarning: string | null = null;
+
+    // `interpretConversationTurn` has already vetoed selections the conversation
+    // cannot support (wording from an older turn, or no list on screen), so an
+    // intent of "selection" here means a position was genuinely named just now.
+    // What remains is whether that position still points at a real match.
+    if (turn.intent === "selection") {
+      const chosen = shown[turn.position - 1];
+
+      if (chosen === undefined) {
+        // A warning, not an error. The same sentence may have carried perfectly
+        // good criteria, and failing the turn would throw those away too — which
+        // is the exact bug this rewrite exists to fix.
+        selectionWarning =
+          shown.length === 1
+            ? `There was only one match, so position ${turn.position} did not apply.`
+            : `There were only ${shown.length} matches, so position ${turn.position} did not apply.`;
+      } else if (!search.contacts.some((contact) => contact.id === chosen.id)) {
+        // The same sentence narrowed the search past the person it pointed at.
+        selectionWarning = `${chosen.label} is no longer among the matches, so that choice was not applied.`;
+      } else {
+        selectedContactId = chosen.id;
+        selectedPosition = turn.position;
+      }
+    } else if (carriedSelection !== null && selectedContactId !== carriedSelection) {
+      // The selection was dropped, not by anything the user said about it, but
+      // because this turn's criteria narrowed the list past that person. Say so —
+      // silently losing a pick is what made this hard to notice in the first place.
+      const previous = shown.find((contact) => contact.id === carriedSelection);
+
+      selectionWarning =
+        previous === undefined
+          ? "Your earlier choice is no longer among the matches."
+          : `${previous.label} is no longer among the matches, so that choice was cleared.`;
+    }
+
     console.info(
-      `[process-audio] ok provider=${transcription.providerId} turns=${transcripts.length} ms=${Date.now() - startedAt} mode=${search.mode} total=${search.total}`,
+      `[process-audio] provider=${transcription.providerId} intent=${turn.intent} turns=${transcripts.length} ms=${Date.now() - startedAt} mode=${search.mode} total=${search.total} selected=${selectedContactId ?? "none"}`,
     );
 
     return NextResponse.json(
@@ -90,15 +160,12 @@ export async function POST(
         success: true,
         transcript: transcription.transcript,
         transcripts,
-        transcription: {
-          provider: transcription.providerId,
-          label: TRANSCRIPTION_PROVIDER_META[transcription.providerId].label,
-          model: transcription.model,
-          latencyMs: transcription.latencyMs,
-          keytermCount: transcription.keytermCount,
-        },
+        transcription: transcriptionMeta,
         state,
         search,
+        selectedContactId,
+        selectedPosition,
+        selectionWarning,
       },
       { status: 200 },
     );

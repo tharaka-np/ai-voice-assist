@@ -84,3 +84,29 @@ export function enumString(
     description,
   } as const;
 }
+
+/**
+ * A required JSON Schema integer property.
+ *
+ * Used for a 1-based list position. Expressing "no selection" needs a sentinel
+ * rather than omission, so callers should document zero as that sentinel.
+ */
+export function describedInteger(description: string) {
+  return {
+    type: "integer",
+    description,
+  } as const;
+}
+
+/**
+ * A required nested object property.
+ *
+ * OpenAI strict mode applies the same rules at every level, so a nested object
+ * must also list every property in `required` and forbid extras.
+ */
+export function nestedObject(
+  description: string,
+  schema: StrictObjectJsonSchema,
+) {
+  return { ...schema, description } as const;
+}

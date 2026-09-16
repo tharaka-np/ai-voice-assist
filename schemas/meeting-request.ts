@@ -204,7 +204,11 @@ export function normalizeMeetingRequest(raw: unknown): unknown {
 // OpenAI Structured Outputs descriptor
 // ---------------------------------------------------------------------------
 
-const meetingRequestJsonSchema = {
+/**
+ * The 11-field body, exported so `schemas/conversation-turn.ts` can nest it
+ * without redeclaring every property.
+ */
+export const meetingRequestJsonSchema = {
   type: "object",
   properties: {
     fname: describedString(
