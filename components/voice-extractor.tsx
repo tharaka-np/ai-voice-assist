@@ -2,20 +2,20 @@
 
 import { useCallback, useRef, useState } from "react";
 
-import { AudioPlayer } from "@/components/audio-player";
-import { AudioRecorder } from "@/components/audio-recorder";
 import { ContactResults } from "@/components/contact-results";
 import {
   ConversationSummary,
   type Utterance,
 } from "@/components/conversation-summary";
 import { MeetingForm } from "@/components/meeting-form";
+import { MicDock } from "@/components/mic-dock";
 import { ProviderSelector } from "@/components/provider-selector";
 import { SavedMeetingCard } from "@/components/saved-meeting";
-import { TranscriptCard } from "@/components/transcript-card";
+import { StepIndicator, type FlowStep } from "@/components/step-indicator";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
+import { Disclosure } from "@/components/ui/disclosure";
 import { useAudioRecorder } from "@/hooks/use-audio-recorder";
 import { GENERIC_ERROR_MESSAGE } from "@/lib/errors";
 import { resolveBrowserTimeZone, toLocalIsoString } from "@/lib/format";
@@ -60,6 +60,11 @@ type VoiceExtractorProps = {
  * The trade-off is that `state` is no longer deterministic. It is a model output,
  * validated by Zod on the server, and it is re-derived on every turn rather than
  * accumulated.
+ *
+ * Layout is a two-pane workbench. A sticky rail holds the conversation and the one
+ * copy of the capture controls; the main pane holds the workflow. That arrangement
+ * replaced a single stacked column of five cards, in which the record button had to
+ * migrate between cards to stay reachable and six surfaces were rendered twice.
  */
 export function VoiceExtractor({
   providerOptions,
@@ -224,109 +229,36 @@ export function VoiceExtractor({
    */
   const meetingSignature = `${state.meetingDate}|${state.meetingTime}|${state.notes}`;
 
-  /**
-   * Whether the capture controls live inside the matches card this turn.
-   *
-   * Once there are rows on screen, refining is done from there: record, play back
-   * and submit all sit under the list, so choosing and correcting happen in one
-   * place instead of scrolling between two cards.
-   *
-   * `contacts.length > 0` is the right test rather than the mode, because it is
-   * exactly the condition under which `ContactResults` renders a card at all — the
-   * `idle` and `empty` outcomes both carry no rows. Without that the controls would
-   * have nowhere to go on a turn that matched nobody, and the conversation would be
-   * unrecoverable.
-   */
-  const controlsInResults =
-    !isFirstTurn && savedMeeting === null && search.contacts.length > 0;
-
-  /**
-   * Record, play back, submit. Defined once and rendered in exactly one place —
-   * either the top card or the matches card, never both, so there is only ever one
-   * submit button and one live region.
-   */
-  const captureControls = (
-    <>
-      {!recorder.isSupported ? (
-        <div className="mb-4">
-          <Alert tone="info" title="Recording isn't available in this browser">
-            Your browser doesn&apos;t support the MediaRecorder API. Try the
-            latest Chrome, Edge, Firefox or Safari.
-          </Alert>
-        </div>
-      ) : null}
-
-      <AudioRecorder
-        status={recorder.status}
-        isSupported={recorder.isSupported}
-        duration={recorder.duration}
-        maxDuration={recorder.maxDuration}
-        hasClip={recorder.clip !== null}
-        busy={isProcessing}
-        onStart={recorder.startRecording}
-        onStop={recorder.stopRecording}
-        onReset={recorder.resetRecording}
-        onSelectFile={recorder.loadAudioFile}
-      />
-
-      {recorder.audioUrl !== null ? (
-        <div className="mt-5 space-y-5">
-          <AudioPlayer
-            key={recorder.audioUrl}
-            src={recorder.audioUrl}
-            label={
-              recorder.clip?.source === "upload"
-                ? "Uploaded audio"
-                : "Recorded audio"
-            }
-          />
-
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              onClick={handleSubmitTurn}
-              disabled={isProcessing || !isProviderAvailable}
-            >
-              {isProcessing
-                ? PROCESSING_MESSAGE
-                : isFirstTurn
-                  ? "Search for this contact"
-                  : "Add these details"}
-            </Button>
-
-            <span
-              role="status"
-              aria-live="polite"
-              className="text-sm text-slate-500 dark:text-slate-400"
-            >
-              {isProcessing ? PROCESSING_MESSAGE : null}
-            </span>
-          </div>
-        </div>
-      ) : null}
-    </>
-  );
+  /** Where the user is, read off existing state rather than tracked separately. */
+  const step: FlowStep =
+    savedMeeting !== null
+      ? "saved"
+      : selectedContact !== null
+        ? "confirm"
+        : search.contacts.length > 0
+          ? "choose"
+          : "describe";
 
   return (
-    <div className="space-y-6">
-      {/* Stays at the top all the way through. The engine choice is a setting for
-          the whole conversation, not part of a turn, so it does not travel with the
-          record button. */}
-      <Card>
-        <CardTitle hint={isFirstTurn ? "Step 1" : `Turn ${turnCount + 1}`}>
-          {isFirstTurn
-            ? "Describe who you are looking for"
-            : controlsInResults
-              ? // Not "Transcription engine": the picker below carries that as its
-                // own legend, and repeating it reads as a mistake.
-                "Conversation"
-              : "Add more details"}
-        </CardTitle>
-
-        <div
-          className={
-            controlsInResults
-              ? undefined
-              : "mb-5 border-b border-slate-200 pb-5 dark:border-slate-800"
+    <div className="space-y-5">
+      {/* Settings strip. The engine choice applies to the whole conversation, so it
+          lives here rather than travelling with the record button, and it is folded
+          away because it is set once and rarely revisited. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
+        <Disclosure
+          className="min-w-0 flex-1"
+          summary={
+            <span className="flex min-w-0 items-center gap-2 text-sm">
+              <span className="text-slate-500 dark:text-slate-400">Engine</span>
+              <span className="truncate font-medium text-slate-900 dark:text-slate-100">
+                {selectedOption?.label ?? "Not configured"}
+              </span>
+              {selectedOption !== undefined ? (
+                <code className="hidden shrink-0 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600 sm:inline dark:bg-slate-800 dark:text-slate-300">
+                  {selectedOption.model}
+                </code>
+              ) : null}
+            </span>
           }
         >
           <ProviderSelector
@@ -335,18 +267,18 @@ export function VoiceExtractor({
             disabled={isProcessing}
             onChange={setProviderId}
           />
-        </div>
-
-        {controlsInResults ? null : captureControls}
+        </Disclosure>
 
         {turnCount > 0 ? (
-          <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
-            <Button variant="ghost" onClick={handleStartOver} disabled={isProcessing}>
-              Start over
-            </Button>
-          </div>
+          <Button
+            variant="ghost"
+            onClick={handleStartOver}
+            disabled={isProcessing}
+          >
+            Start over
+          </Button>
         ) : null}
-      </Card>
+      </div>
 
       {noProviderConfigured ? (
         <Alert tone="info" title="No transcription engine is configured">
@@ -369,8 +301,8 @@ export function VoiceExtractor({
           {recorder.isPermissionDenied ? (
             <p className="mt-2">
               In Chrome and Edge, use the icon at the left of the address bar. In
-              Safari, check Settings → Websites → Microphone. In Firefox, clear
-              the blocked permission from the padlock menu.
+              Safari, check Settings → Websites → Microphone. In Firefox, clear the
+              blocked permission from the padlock menu.
             </p>
           ) : null}
           {turnCount > 0 ? (
@@ -379,57 +311,101 @@ export function VoiceExtractor({
         </Alert>
       ) : null}
 
-      {/* Shows the last thing heard whatever kind of turn it was, so a command
-          gets the same acknowledgement a criteria turn does. */}
-      {lastTranscription !== null &&
-      recorder.clip === null &&
-      utterances.length > 0 ? (
-        <TranscriptCard
-          transcript={utterances[utterances.length - 1]?.text ?? ""}
-          transcription={lastTranscription}
-        />
-      ) : null}
+      <div className="grid gap-5 lg:grid-cols-12">
+        {/*
+          Rail. Second in the source order on small screens so the workflow leads,
+          but first visually from `lg` up. Sticky, so the capture controls never
+          scroll away — which is what removed the need to relocate them per turn.
+        */}
+        <aside className="order-2 lg:order-1 lg:col-span-4">
+          <div className="space-y-4 lg:sticky lg:top-6">
+            <MicDock
+              recorder={recorder}
+              busy={isProcessing}
+              canSubmit={isProviderAvailable}
+              submitLabel={
+                isFirstTurn ? "Search for this contact" : "Add these details"
+              }
+              processingLabel={PROCESSING_MESSAGE}
+              onSubmit={handleSubmitTurn}
+            />
 
-      <ConversationSummary utterances={utterances} state={state} />
-
-      {savedMeeting === null ? (
-        <ContactResults
-          search={search}
-          selectedContactId={selectedContactId}
-          busy={isProcessing}
-          onSelect={setSelectedContactId}
-          // Refining happens under the list it refines. Null on the first turn, so
-          // the initial card keeps the controls and this one stays a pure result
-          // list until there is something to correct.
-          footer={controlsInResults ? captureControls : null}
-        />
-      ) : null}
-
-      {savedMeeting !== null ? (
-        <>
-          <SavedMeetingCard meeting={savedMeeting} />
-          <div className="flex flex-wrap items-center gap-3">
-            <Button variant="secondary" onClick={handleStartOver}>
-              Start a new search
-            </Button>
+            <ConversationSummary
+              utterances={utterances}
+              state={state}
+              // Hidden while the form is open: the form is the editable view of
+              // exactly these values.
+              showMeeting={selectedContact === null && savedMeeting === null}
+              transcription={lastTranscription}
+            />
           </div>
-        </>
-      ) : null}
+        </aside>
 
-      {savedMeeting === null && selectedContact !== null ? (
-        /* Keyed on the contact *and* the meeting details, so the form re-reads its
-           initial values whenever either changes, rather than syncing via an
-           effect. Keying on the contact alone left the form stale: a later turn
-           that supplied a date for the same person changed nothing on screen until
-           you clicked Change and picked them again. */
-        <MeetingForm
-          key={`meeting-form-${selectedContact.id}-${meetingSignature}`}
-          contact={selectedContact}
-          state={state}
-          onSaved={setSavedMeeting}
-          onChangeContact={() => setSelectedContactId(null)}
-        />
-      ) : null}
+        <div className="order-1 space-y-5 lg:order-2 lg:col-span-8">
+          <StepIndicator step={step} />
+
+          {isFirstTurn && activeError === null ? (
+            <Card>
+              <CardTitle hint="Step 1">Describe who you are looking for</CardTitle>
+
+              <p className="text-sm text-slate-600 dark:text-slate-400">
+                Record a sentence naming the person. You can add the meeting in the
+                same breath, or in a later turn — whatever you leave out stays empty
+                rather than being guessed.
+              </p>
+
+              <div className="mt-4 space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  Try saying
+                </p>
+                {[
+                  "Find Amanda Wilson in Austin.",
+                  "Schedule a meeting on September 20th, 2026 at 2 PM to discuss the Spice CRM release.",
+                ].map((example) => (
+                  <p
+                    key={example}
+                    className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700 dark:bg-slate-800/60 dark:text-slate-300"
+                  >
+                    &ldquo;{example}&rdquo;
+                  </p>
+                ))}
+              </div>
+            </Card>
+          ) : null}
+
+          {savedMeeting === null ? (
+            <ContactResults
+              search={search}
+              selectedContactId={selectedContactId}
+              busy={isProcessing}
+              onSelect={setSelectedContactId}
+            />
+          ) : null}
+
+          {savedMeeting === null && selectedContact !== null ? (
+            /* Keyed on the contact *and* the meeting details, so the form re-reads
+               its initial values whenever either changes, rather than syncing via an
+               effect. Keying on the contact alone left the form stale: a later turn
+               that supplied a date for the same person changed nothing on screen
+               until you clicked Change and picked them again. */
+            <MeetingForm
+              key={`meeting-form-${selectedContact.id}-${meetingSignature}`}
+              contact={selectedContact}
+              state={state}
+              onSaved={setSavedMeeting}
+            />
+          ) : null}
+
+          {savedMeeting !== null ? (
+            <>
+              <SavedMeetingCard meeting={savedMeeting} />
+              <Button variant="secondary" onClick={handleStartOver}>
+                Start a new search
+              </Button>
+            </>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }

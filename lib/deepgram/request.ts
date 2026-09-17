@@ -11,10 +11,20 @@ export function buildListenUrl({
   baseUrl,
   model,
   keyterms = [],
+  language,
 }: {
   baseUrl: string;
   model: string;
   keyterms?: readonly string[];
+  /**
+   * Pins the language, disabling automatic detection.
+   *
+   * Optional, and omitted from the query when absent. Deepgram already defaults to
+   * English, so leaving it out is harmless — but sending it makes the choice a
+   * property of this application rather than something inherited from a vendor
+   * default that could change.
+   */
+  language?: string;
 }): URL {
   const url = new URL(baseUrl);
 
@@ -22,6 +32,13 @@ export function buildListenUrl({
   // Punctuation and capitalisation, so the extraction step sees text of
   // comparable quality to the OpenAI transcript.
   url.searchParams.set("smart_format", "true");
+
+  // With a language set, Deepgram transcribes only that language rather than
+  // detecting one. Safe alongside keyterms: keyterm prompting works on Nova-3 in
+  // both monolingual and multilingual modes.
+  if (language !== undefined) {
+    url.searchParams.set("language", language);
+  }
 
   // `append`, never `set`: each keyterm is its own repeated parameter. Using
   // `set` would overwrite, leaving only the last term. Separating terms with a

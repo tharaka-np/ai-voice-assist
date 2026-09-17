@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -33,10 +32,7 @@ const FOUR = [
   candidate(16, "Amandah", "Wilsen"),
 ];
 
-function refine(
-  selectedContactId: number | null,
-  footer: ReactNode = null,
-): string {
+function refine(selectedContactId: number | null): string {
   const search: ContactSearchOutcome = {
     mode: "refine",
     total: 4,
@@ -51,13 +47,9 @@ function refine(
       selectedContactId={selectedContactId}
       busy={false}
       onSelect={() => {}}
-      footer={footer}
     />,
   );
 }
-
-/** Stands in for the recorder, which this component knows nothing about. */
-const FOOTER = <button type="button">Start recording</button>;
 
 /**
  * Server-rendered markup checks, no jsdom and no user events.
@@ -106,18 +98,5 @@ describe("ContactResults in refine mode", () => {
   });
 });
 
-describe("ContactResults footer", () => {
-  it("renders the capture controls under the list when given", () => {
-    const html = refine(null, FOOTER);
-
-    expect(html).toContain("Add more details");
-    expect(html).toContain("Start recording");
-  });
-
-  it("renders no footer region on a turn that does not supply one", () => {
-    const html = refine(null);
-
-    expect(html).not.toContain("Add more details");
-    expect(html).not.toContain("Start recording");
-  });
-});
+// The `footer` slot these used to cover is gone: the capture controls now live in
+// the sticky rail, in one place, instead of being handed to this component.

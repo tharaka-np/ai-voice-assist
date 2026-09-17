@@ -13,6 +13,7 @@ import {
   extractDeepgramTranscript,
 } from "@/lib/deepgram/response";
 import { AppError } from "@/lib/errors";
+import { getTranscriptionLanguage } from "@/lib/transcription/language";
 import { finalizeTranscript } from "@/lib/transcription/transcript";
 import type {
   TranscribeOptions,
@@ -47,7 +48,13 @@ export async function transcribeWithDeepgram(
   // Re-normalised here rather than trusted: the caller may pass a raw list, and
   // a term containing a comma or a colon would silently boost nothing.
   const keyterms = prepareKeyterms(options.keyterms ?? []);
-  const url = buildListenUrl({ baseUrl: DEEPGRAM_LISTEN_URL, model, keyterms });
+  const language = getTranscriptionLanguage();
+  const url = buildListenUrl({
+    baseUrl: DEEPGRAM_LISTEN_URL,
+    model,
+    keyterms,
+    language,
+  });
 
   const startedAt = Date.now();
 
@@ -109,7 +116,7 @@ export async function transcribeWithDeepgram(
 
   // Log shape and keyterm count, never the audio or the transcript text.
   console.info(
-    `[transcribe] provider=deepgram model=${model} ms=${latencyMs} bytes=${file.size} chars=${transcript.trim().length} keyterms=${keyterms.length}`,
+    `[transcribe] provider=deepgram model=${model} lang=${language} ms=${latencyMs} bytes=${file.size} chars=${transcript.trim().length} keyterms=${keyterms.length}`,
   );
 
   return finalizeTranscript({

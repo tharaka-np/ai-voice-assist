@@ -6,6 +6,7 @@ import {
   getTranscriptionModel,
   isOpenAiConfigured,
 } from "@/lib/openai/client";
+import { getTranscriptionLanguage } from "@/lib/transcription/language";
 import { finalizeTranscript } from "@/lib/transcription/transcript";
 import type {
   TranscriptionProvider,
@@ -30,6 +31,7 @@ import type {
 export async function transcribeAudio(file: File): Promise<TranscriptionResult> {
   const client = getOpenAIClient();
   const model = getTranscriptionModel();
+  const language = getTranscriptionLanguage();
   const startedAt = Date.now();
 
   let response;
@@ -37,6 +39,12 @@ export async function transcribeAudio(file: File): Promise<TranscriptionResult> 
     response = await client.audio.transcriptions.create({
       file,
       model,
+      // Pins the language instead of letting the model detect one. This is the
+      // fix for transcripts coming back in the wrong alphabet: with no language
+      // set, a one-second clip carrying an unusual proper noun gave detection too
+      // little to go on, and "Find Tharaka" came back as Urdu script. OpenAI also
+      // documents a language hint as improving accuracy and latency.
+      language,
       response_format: "json",
     });
   } catch (error) {
@@ -55,7 +63,7 @@ export async function transcribeAudio(file: File): Promise<TranscriptionResult> 
 
   // Log shape, not content: transcripts can contain personal information.
   console.info(
-    `[transcribe] provider=openai model=${model} ms=${latencyMs} bytes=${file.size} chars=${raw.trim().length}`,
+    `[transcribe] provider=openai model=${model} lang=${language} ms=${latencyMs} bytes=${file.size} chars=${raw.trim().length}`,
   );
 
   return finalizeTranscript({ raw, providerId: "openai", model, latencyMs });
