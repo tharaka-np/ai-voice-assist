@@ -5,7 +5,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
-import { formatMeetingDate, formatMeetingTime, maskPhone } from "@/lib/format";
+import { formatMeetingDate, formatMeetingTime } from "@/lib/format";
 import type { ContactCandidate } from "@/lib/matching/contact-match";
 import { MeetingSubmissionSchema } from "@/schemas/meeting-submission";
 import type { ConversationState } from "@/schemas/meeting-request";
@@ -16,7 +16,6 @@ type MeetingFormProps = {
   /** Accumulated state; supplies the initial date, time and description. */
   state: ConversationState;
   onSaved: (meeting: SavedMeeting) => void;
-  onChangeContact: () => void;
 };
 
 const FIELD_CLASSES =
@@ -33,12 +32,7 @@ const FIELD_CLASSES =
  * conversation never supplied has to be filled in here — the "never guess" rule
  * resolving at the human step rather than with a silent default.
  */
-export function MeetingForm({
-  contact,
-  state,
-  onSaved,
-  onChangeContact,
-}: MeetingFormProps) {
+export function MeetingForm({ contact, state, onSaved }: MeetingFormProps) {
   const [date, setDate] = useState(state.meetingDate);
   const [time, setTime] = useState(state.meetingTime);
   const [description, setDescription] = useState(state.notes);
@@ -126,34 +120,11 @@ export function MeetingForm({
     <Card>
       <CardTitle hint="Final step">Confirm and schedule</CardTitle>
 
+      {/* No "selected contact" panel here. The collapsed strip in the match list
+          directly above already names who is chosen and offers the way to change
+          them, and repeating it was one of six surfaces the old layout rendered
+          twice. `contact` is still used, for the userId and the submit label. */}
       <div className="space-y-5">
-        <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-900 dark:bg-indigo-950/40">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div className="min-w-0">
-              <p className="text-xs font-medium uppercase tracking-wide text-indigo-500 dark:text-indigo-400">
-                Selected contact
-              </p>
-              <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-                {contact.label}
-              </p>
-              <p className="text-xs text-slate-600 dark:text-slate-400">
-                {contact.city}
-                {contact.state !== "" ? `, ${contact.state}` : ""} ·{" "}
-                {contact.email} · {maskPhone(contact.phoneNumber)}
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={onChangeContact}
-              disabled={isSaving}
-              className="text-xs font-medium text-indigo-600 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-indigo-400"
-            >
-              Change
-            </button>
-          </div>
-        </div>
-
         {missingCount > 0 && !showValidation ? (
           <p className="text-xs text-amber-700 dark:text-amber-400">
             The conversation didn&apos;t mention{" "}
