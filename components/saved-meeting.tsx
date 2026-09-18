@@ -1,59 +1,37 @@
-import { Card, CardTitle } from "@/components/ui/card";
+import { CheckIcon } from "@/components/icons";
 import { formatMeetingDate, formatMeetingTime } from "@/lib/format";
 import type { SavedMeeting } from "@/types/api";
 
 /**
- * Terminal success state.
+ * The write confirmation, as the message that follows the frozen form.
  *
- * Reports exactly what was written, including the database id, so the outcome is
- * verifiable rather than a generic "saved" toast.
+ * Deliberately compact. The frozen form above it already shows the date, time and
+ * notes, so repeating them here would be the third copy of the same three values.
+ * What this adds is the part only the database knows: that the row exists, and its id.
+ * Reporting the id keeps the outcome verifiable rather than a generic "saved".
  */
 export function SavedMeetingCard({ meeting }: { meeting: SavedMeeting }) {
   return (
-    <Card className="border-emerald-300 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-950/30">
-      <CardTitle hint={`Meeting #${meeting.id}`}>Saved</CardTitle>
+    <div className="flex items-start gap-2.5">
+      <span
+        aria-hidden="true"
+        className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white dark:bg-emerald-500"
+      >
+        <CheckIcon className="size-3" />
+      </span>
 
-      <dl className="grid gap-4 sm:grid-cols-3">
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-emerald-800 dark:text-emerald-300">
-            Person
-          </dt>
-          <dd className="mt-1 text-sm text-slate-900 dark:text-slate-100">
-            {meeting.userLabel}
-          </dd>
-        </div>
-
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-emerald-800 dark:text-emerald-300">
-            Date
-          </dt>
-          <dd className="mt-1 text-sm text-slate-900 dark:text-slate-100">
-            {formatMeetingDate(meeting.date)}
-          </dd>
-        </div>
-
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-emerald-800 dark:text-emerald-300">
-            Time
-          </dt>
-          <dd className="mt-1 text-sm text-slate-900 dark:text-slate-100">
-            {formatMeetingTime(meeting.time)}
-          </dd>
-        </div>
-
-        <div className="sm:col-span-3">
-          <dt className="text-xs font-medium uppercase tracking-wide text-emerald-800 dark:text-emerald-300">
-            Description
-          </dt>
-          <dd className="mt-1 text-sm text-slate-900 dark:text-slate-100">
-            {meeting.description}
-          </dd>
-        </div>
-      </dl>
-
-      <p className="mt-4 text-xs text-emerald-800 dark:text-emerald-300">
-        Written to the meetings table for directory ID {meeting.userId}.
-      </p>
-    </Card>
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-emerald-800 dark:text-emerald-300">
+          Saved as meeting #{meeting.id}
+        </p>
+        <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
+          {meeting.userLabel} · {formatMeetingDate(meeting.date)} at{" "}
+          {formatMeetingTime(meeting.time)}
+        </p>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-500">
+          Written to the meetings table for directory ID {meeting.userId}.
+        </p>
+      </div>
+    </div>
   );
 }
