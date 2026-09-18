@@ -32,7 +32,10 @@ const FOUR = [
   candidate(16, "Amandah", "Wilsen"),
 ];
 
-function refine(selectedContactId: number | null): string {
+function refine(
+  selectedContactId: number | null,
+  interactive = true,
+): string {
   const search: ContactSearchOutcome = {
     mode: "refine",
     total: 4,
@@ -47,6 +50,7 @@ function refine(selectedContactId: number | null): string {
       selectedContactId={selectedContactId}
       busy={false}
       onSelect={() => {}}
+      interactive={interactive}
     />,
   );
 }
@@ -98,5 +102,57 @@ describe("ContactResults in refine mode", () => {
   });
 });
 
-// The `footer` slot these used to cover is gone: the capture controls now live in
-// the sticky rail, in one place, instead of being handed to this component.
+describe("ContactResults as frozen history", () => {
+  it("keeps the rows a finished turn showed, with no way to act on them", () => {
+    const html = refine(2, false);
+
+    expect(html).toContain("4 possible matches found");
+    // Every candidate stays visible, so the log shows what was on offer.
+    expect(html).toContain("Amanda Willson");
+    expect(html).toContain("Amandah Wilsen");
+    // The load-bearing part: an older list must not be selectable, or a click would
+    // apply a choice to rows that no longer reflect the current criteria.
+    expect(html).not.toContain('type="radio"');
+    expect(html).toContain("no longer selectable");
+  });
+
+  it("marks the chosen row in place, without repeating a position number", () => {
+    const html = refine(2, false);
+
+    expect(html).toContain("Chosen");
+    expect(html).toContain("you chose Amanda Wilson");
+    // A number here contradicted the user's own message: one counts against the list
+    // that was on screen when they spoke, the other against this turn's results.
+    expect(html).not.toContain("you chose #");
+  });
+
+  it("says a refining turn asked for more detail when nothing was chosen", () => {
+    const html = refine(null, false);
+
+    expect(html).toContain("asked for another detail");
+    expect(html).not.toContain("Chosen");
+  });
+
+  it("drops the retry advice from an empty result once the turn is past", () => {
+    const empty: ContactSearchOutcome = {
+      mode: "empty",
+      total: 0,
+      threshold: 3,
+      contacts: [],
+      selectedContactId: null,
+    };
+
+    const frozen = renderToStaticMarkup(
+      <ContactResults
+        search={empty}
+        selectedContactId={null}
+        busy={false}
+        onSelect={() => {}}
+        interactive={false}
+      />,
+    );
+
+    expect(frozen).toContain("No matching contacts found");
+    expect(frozen).not.toContain("Try changing or removing");
+  });
+});
