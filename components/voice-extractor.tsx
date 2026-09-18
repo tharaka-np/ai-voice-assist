@@ -291,10 +291,6 @@ export function VoiceExtractor({
           contact={selectedContact}
           state={state}
           onSaved={handleSaved}
-          // A lone match renders as a "found" line with no list, so the form has to
-          // carry the contact's details itself. With several on screen, the list
-          // above already shows the highlighted row.
-          showContactDetail={search.contacts.length === 1}
         />
       </MessageRow>
     ) : null;

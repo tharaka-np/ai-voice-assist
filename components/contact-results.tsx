@@ -101,50 +101,23 @@ export function ContactResults({
 
   const isRefining = search.mode === "refine";
 
-  /*
-   * A lone match is not a choice.
-   *
-   * A radio group of one asks the user to pick from a list with no alternatives, and
-   * the "or say select the third one" hint underneath it is nonsense. `resolveContactSearch`
-   * has already selected the row, so the only honest thing to render is the fact:
-   * this is who was found.
-   *
-   * Deliberately before the interactive/frozen split. The two renderings are identical
-   * here because there was never anything to act on, so a past turn loses nothing.
-   * The contact's details live in the meeting form below, which is the step that
-   * actually needs them.
-   */
-  if (search.contacts.length === 1) {
-    const only = search.contacts[0];
-
-    return (
-      <p className="flex flex-wrap items-center gap-x-2 text-sm">
-        <span
-          aria-hidden="true"
-          className="inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white dark:bg-emerald-500"
-        >
-          <CheckIcon className="size-2.5" />
-        </span>
-        <span className="text-slate-600 dark:text-slate-400">Found</span>
-        <span className="font-medium text-slate-900 dark:text-slate-100">
-          {only.label}
-        </span>
-        <span className="text-xs text-slate-500 dark:text-slate-400">
-          {placeOf(only)}
-          {only.score < 1 ? ` · ${Math.round(only.score * 100)}% match` : null}
-        </span>
-      </p>
-    );
-  }
-
   // Derived from the list rather than tracked separately, so the badge cannot
   // disagree with what is rendered. 0 means nothing selected.
   const selectedIndex = search.contacts.findIndex(
     (contact) => contact.id === selectedContactId,
   );
-  const selectedPosition = selectedIndex + 1;
   const selectedContact =
     selectedIndex === -1 ? null : search.contacts[selectedIndex];
+
+  const radioRows = (
+    <RadioRows
+      search={search}
+      selectedContactId={selectedContactId}
+      busy={busy}
+      onSelect={onSelect}
+      isRefining={isRefining}
+    />
+  );
 
   // A finished turn keeps its rows, read-only.
   //
@@ -246,6 +219,68 @@ export function ContactResults({
     );
   }
 
+  /*
+   * A settled choice states itself; it does not ask again.
+   *
+   * Reached when a position was spoken, a row was clicked, or a lone match was
+   * auto-selected. Radio buttons here would be asking a question the user has already
+   * answered, and a radio group of one — the lone-match case — has no alternatives at
+   * all. The contact's details belong to the meeting form below, which is the step
+   * that acts on them.
+   *
+   * No position number in this line, deliberately. It would count against *this*
+   * turn's results, while the user's own message counts against the list that was on
+   * screen when they spoke. Those disagree whenever a turn re-ranks the list, which is
+   * exactly what produced a "#1 selected" label under a "chose #2" message.
+   */
+  const settled = selectedContact ?? (search.contacts.length === 1 ? search.contacts[0] : null);
+
+  if (settled !== null) {
+    return (
+      <div>
+        <p className="flex flex-wrap items-center gap-x-2 text-sm">
+          <span
+            aria-hidden="true"
+            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white dark:bg-emerald-500"
+          >
+            <CheckIcon className="size-2.5" />
+          </span>
+          <span className="text-slate-600 dark:text-slate-400">
+            {selectedContact !== null ? "Selected" : "Found"}
+          </span>
+          <span className="font-medium text-slate-900 dark:text-slate-100">
+            {settled.label}
+          </span>
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            {placeOf(settled)}
+            {settled.score < 1
+              ? ` · ${Math.round(settled.score * 100)}% match`
+              : null}
+          </span>
+        </p>
+
+        {/*
+          No alternatives offered here, deliberately.
+          
+          The choice is made and the next step — the meeting form — is directly below,
+          so a list of rejected candidates only competes with it. Changing is spoken
+          instead: another position, or a detail that narrows the search.
+          
+          The cost is that the numbered rows are no longer on this message. Positions
+          still resolve correctly, because the request carries the real candidate list
+          whatever is rendered, and the earlier message keeps its numbered rows. They
+          can drift apart if a later turn narrows the search while this selection is
+          carried, since that list would then be visible nowhere.
+        */}
+        {search.contacts.length > 1 ? (
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Say another position to switch, or add a detail to search again.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -253,18 +288,11 @@ export function ContactResults({
           {matchCountLabel(search.total)}
         </p>
         <span className="text-xs text-slate-500 dark:text-slate-400">
-          {selectedPosition > 0
-            ? `#${selectedPosition} selected`
-            : isRefining
-              ? `Threshold is ${search.threshold}`
-              : "Pick the right person"}
+          {isRefining ? `Threshold is ${search.threshold}` : "Pick the right person"}
         </span>
       </div>
 
-      {/* Only while the choice is still open. Once someone is selected the warning
-          has nothing left to ask for — the user has answered the question it was
-          posing, and leaving it up reads as an unresolved problem. */}
-      {isRefining && selectedContact === null ? (
+      {isRefining ? (
         <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
           <p className="font-medium">Too many matches to choose from.</p>
           <p className="mt-0.5">
@@ -275,6 +303,27 @@ export function ContactResults({
         </div>
       ) : null}
 
+      {radioRows}
+    </div>
+  );
+}
+
+/** Extracted so the settled view can offer the same rows behind "Change". */
+function RadioRows({
+  search,
+  selectedContactId,
+  busy,
+  onSelect,
+  isRefining,
+}: {
+  search: ContactSearchOutcome;
+  selectedContactId: number | null;
+  busy: boolean;
+  onSelect: (contactId: number) => void;
+  isRefining: boolean;
+}) {
+  return (
+    <div>
       <ul className="space-y-2">
         {search.contacts.map((contact, index) => {
           const isSelected = contact.id === selectedContactId;

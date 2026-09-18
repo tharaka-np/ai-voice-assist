@@ -62,43 +62,93 @@ function refine(
  * `refine` mode showed nothing at all, because the rows were rendered read-only in
  * that mode even though the API honours a spoken position there.
  */
-describe("ContactResults in refine mode", () => {
-  it("indicates the selected row", () => {
+describe("ContactResults with nothing chosen yet", () => {
+  it("asks the question, with a radio per candidate", () => {
+    const html = refine(null);
+
+    expect(html).toContain("4 possible matches found");
+    expect(html).toContain("Threshold is 3");
+    expect(html).toContain("Too many matches to choose from.");
+    expect(html.match(/type="radio"/g)?.length).toBe(4);
+    expect(html).not.toContain("Selected");
+  });
+});
+
+describe("ContactResults once a choice is settled", () => {
+  it("states the choice instead of asking again", () => {
     const html = refine(2);
 
     expect(html).toContain("Selected");
-    expect(html).toContain("#3 selected");
-    // Selection is offered, not just displayed.
-    expect(html).toContain('type="radio"');
-    expect(html).toContain('checked=""');
+    expect(html).toContain("Amanda Wilson");
+    // The question has been answered, so it is no longer put.
+    expect(html).not.toContain("4 possible matches found");
+    expect(html).not.toContain("Too many matches to choose from.");
   });
 
-  it("shows no selection marker when nothing is chosen", () => {
-    const html = refine(null);
-
-    expect(html).not.toContain("Selected");
-    expect(html).toContain("Threshold is 3");
-    expect(html).toContain("Too many matches to choose from.");
+  it("never prints a position number", () => {
+    // It would count against this turn's results, while the user's own message counts
+    // against the list that was on screen when they spoke. Those disagree the moment a
+    // turn re-ranks the list — which is how "#1 selected" ended up under "chose #2".
+    for (const id of [15, 1, 2, 16]) {
+      const html = refine(id);
+      expect(html).not.toContain("selected</span>");
+      expect(html).not.toMatch(/#\d/);
+    }
   });
 
-  it("counts the position from the rendered order", () => {
-    // id 15 is displayed first, so it is #1 even though its id is highest.
-    expect(refine(15)).toContain("#1 selected");
-    expect(refine(16)).toContain("#4 selected");
-  });
-
-  it("drops the refinement warning once someone is selected", () => {
-    // It was asking the user to narrow the list. They answered it by picking, so
-    // leaving it up reads as an unresolved problem.
-    expect(refine(2)).not.toContain("Too many matches to choose from.");
-    expect(refine(2)).not.toContain("Add another detail such as");
-  });
-
-  it("keeps the rows and the count when the warning goes", () => {
+  it("shows no candidate list at all", () => {
     const html = refine(2);
 
-    expect(html).toContain("4 possible matches found");
-    expect(html).toContain("Amandah Wilsen");
+    // The whole point: nothing between the confirmation and the meeting form.
+    expect(html).not.toContain('type="radio"');
+    expect(html).not.toContain("<details");
+    expect(html).not.toContain("Change ·");
+    expect(html).not.toContain("Amandah Wilsen");
+    // Changing is still possible, so the route to it is named.
+    expect(html).toContain("Say another position to switch");
+  });
+
+  it("says nothing about switching when there is nothing to switch to", () => {
+    const html = renderToStaticMarkup(
+      <ContactResults
+        search={{
+          mode: "select",
+          total: 1,
+          threshold: 3,
+          contacts: [FOUR[1]],
+          selectedContactId: FOUR[1].id,
+        }}
+        selectedContactId={FOUR[1].id}
+        busy={false}
+        onSelect={() => {}}
+        interactive
+      />,
+    );
+
+    expect(html).toContain("Selected");
+    expect(html).not.toContain("<details");
+    expect(html).not.toContain('type="radio"');
+  });
+
+  it("says Found rather than Selected for an auto-selected lone match", () => {
+    const html = renderToStaticMarkup(
+      <ContactResults
+        search={{
+          mode: "select",
+          total: 1,
+          threshold: 3,
+          contacts: [FOUR[1]],
+          selectedContactId: null,
+        }}
+        selectedContactId={null}
+        busy={false}
+        onSelect={() => {}}
+        interactive
+      />,
+    );
+
+    expect(html).toContain("Found");
+    expect(html).not.toContain('type="radio"');
   });
 });
 

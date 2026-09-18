@@ -20,14 +20,6 @@ type MeetingFormProps = {
   /** Accumulated state; supplies the initial date, time and description. */
   state: ConversationState;
   onSaved: (meeting: SavedMeeting) => void;
-  /**
-   * Whether to name the contact in full at the top of the form.
-   *
-   * True when the search returned exactly one match, because that turn's message
-   * shows a plain "found" line rather than a selectable list, leaving nowhere else
-   * for the contact's details to appear before a write.
-   */
-  showContactDetail: boolean;
 };
 
 const FIELD_CLASSES =
@@ -44,12 +36,7 @@ const FIELD_CLASSES =
  * conversation never supplied has to be filled in here — the "never guess" rule
  * resolving at the human step rather than with a silent default.
  */
-export function MeetingForm({
-  contact,
-  state,
-  onSaved,
-  showContactDetail,
-}: MeetingFormProps) {
+export function MeetingForm({ contact, state, onSaved }: MeetingFormProps) {
   const [date, setDate] = useState(state.meetingDate);
   const [time, setTime] = useState(state.meetingTime);
   const [description, setDescription] = useState(state.notes);
@@ -146,46 +133,43 @@ export function MeetingForm({
   return (
     <div>
       <p className="mb-3 text-sm font-medium text-slate-900 dark:text-slate-100">
-        {showContactDetail
-          ? "Confirm and schedule"
-          : `Confirm and schedule with ${contact.label}`}
+        Confirm and schedule
       </p>
 
       {/*
         Who the row will be written for.
         
-        Shown only when the message above has no list to point at — a lone match is
-        rendered there as a plain "found" line, so without this the contact's details
-        would appear nowhere before a database write. When several matched, that list
-        is on screen with the chosen row highlighted, and repeating it here would be
-        a third copy of the same person.
+        Unconditional, because this form only ever renders once a contact is settled,
+        and the message above collapses to a one-line confirmation at that point. There
+        is no visible list left to carry these details, so the last screen before a
+        database write has to state them itself. It was briefly conditional, back when
+        a selected row stayed visible in a radio list above and this would have been a
+        third copy of the same person.
       */}
-      {showContactDetail ? (
-        <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
-          <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
-            Meeting with
-          </p>
-          <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-            {contact.label}
-          </p>
-          <p className="text-xs text-slate-600 dark:text-slate-400">
-            {contact.city}
-            {contact.state !== "" ? `, ${contact.state}` : ""} · {contact.email}
-          </p>
-          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            {maskPhone(contact.phoneNumber)}
-            {` · ${formatGender(contact.gender)}`}
-            {contact.score < 1
-              ? ` · ${Math.round(contact.score * 100)}% match`
-              : " · exact match"}
-          </p>
-          {/* There is no "change" control here because there is nothing to change to.
-              Naming the way out keeps that from reading as an omission. */}
-          <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-500">
-            The only contact that matched. Speak again to search for someone else.
-          </p>
-        </div>
-      ) : null}
+      <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          Meeting with
+        </p>
+        <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+          {contact.label}
+        </p>
+        <p className="text-xs text-slate-600 dark:text-slate-400">
+          {contact.city}
+          {contact.state !== "" ? `, ${contact.state}` : ""} · {contact.email}
+        </p>
+        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+          {maskPhone(contact.phoneNumber)}
+          {` · ${formatGender(contact.gender)}`}
+          {contact.score < 1
+            ? ` · ${Math.round(contact.score * 100)}% match`
+            : " · exact match"}
+        </p>
+        {/* Names the way out. There is no click-path to a different contact any more,
+            so without this the form looks like a dead end when it isn't. */}
+        <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-500">
+          Not the right person? Say another position, or a detail to search again.
+        </p>
+      </div>
 
       <div className="space-y-4">
         {/* Worded for both ways a field ends up blank: never spoken, or cleared by
